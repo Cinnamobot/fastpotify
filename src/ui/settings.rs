@@ -308,6 +308,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         RowText::new("Normalize volume", "Keep loud and quiet tracks at a similar level."),
         RowText::new("Autoplay", "Keep playing similar songs when your music ends."),
         RowText::new("Gapless playback", "Play tracks without silence between them."),
+        RowText::new(
+            "Crossfade",
+            "Seconds one track overlaps the next. 0 turns it off, 12 is the most Spotify's own clients allow.",
+        ),
         RowText::new("Keep music playing when the window closes", super::keys::platform_shortcut(
                     "Fastpotify hides to the system tray. Quit from the tray menu or with Ctrl+Q.",
                     "Fastpotify hides to the system tray. Quit from the tray menu or with Cmd+Q.",
@@ -458,6 +462,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 "Playback on this computer",
                 &playback_rows[6],
                 |ui| {
+                    let mut seconds = i32::from(app.settings.crossfade_seconds);
+                    let slider = egui::Slider::new(&mut seconds, 0..=12)
+                        .suffix(" s")
+                        .text("");
+                    if ui.add(slider).changed() {
+                        app.settings.crossfade_seconds = seconds as u8;
+                        changed = true;
+                        playback_dirty = true;
+                    }
+                },
+            );
+            filtered_row(
+                ui,
+                &palette,
+                &needle,
+                "Playback on this computer",
+                &playback_rows[7],
+                |ui| {
                     if widgets::switch(
                         ui,
                         &palette,
@@ -475,7 +497,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 &needle,
                 "Playback on this computer",
-                &playback_rows[7],
+                &playback_rows[8],
                 |ui| {
                     if widgets::switch(
                         ui,
@@ -494,7 +516,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 &needle,
                 "Playback on this computer",
-                &playback_rows[13],
+                &playback_rows[14],
                 |ui| {
                     if widgets::switch(
                         ui,
@@ -514,7 +536,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     &palette,
                     &needle,
                     "Playback on this computer",
-                    &playback_rows[8],
+                    &playback_rows[9],
                     |ui| {
                         let current = app
                             .settings
@@ -547,7 +569,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 &needle,
                 "Playback on this computer",
-                &playback_rows[9],
+                &playback_rows[10],
                 |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -571,7 +593,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 &needle,
                 "Playback on this computer",
-                &playback_rows[10],
+                &playback_rows[11],
                 |ui| {
                     // The control area lays out right-to-left: add the rightmost item first.
                     ui.horizontal(|ui| {
@@ -612,8 +634,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             );
             ui.add_space(4.0);
             if playback_dirty
-                || playback_rows[11].matches(&needle, "Playback on this computer")
                 || playback_rows[12].matches(&needle, "Playback on this computer")
+                || playback_rows[13].matches(&needle, "Playback on this computer")
             {
                 ui.horizontal(|ui| {
                     if playback_dirty {

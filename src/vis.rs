@@ -14,7 +14,13 @@ use librespot_playback::audio_backend::{Sink, SinkResult};
 use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
 use librespot_playback::mixer::VolumeGetter;
-use librespot_playback::{NUM_CHANNELS, SAMPLE_RATE};
+use librespot_playback::NUM_CHANNELS;
+
+/// Channels in every buffer that crosses this module, and in the tap's own
+/// buffers. Re-exported so automix counts channels the same way the audio
+/// path does.
+pub use librespot_playback::NUM_CHANNELS as CHANNELS;
+pub use librespot_playback::SAMPLE_RATE;
 
 /// Half a second of audio.
 const KEPT: usize = SAMPLE_RATE as usize / 2;
@@ -155,6 +161,8 @@ pub struct Tapped {
     /// Track normalization factor. The tap removes it so visualizers show the
     /// source dynamics, as Winamp's analyser did.
     normalisation: Arc<std::sync::atomic::AtomicU64>,
+    /// Collects the playing track for automix's beat analysis.
+    analysis: Option<Arc<crate::automix_track::Collector>>,
 }
 
 impl Tapped {
@@ -165,6 +173,7 @@ impl Tapped {
         applies_volume: bool,
         eq: crate::eq::SharedEq,
         normalisation: Arc<std::sync::atomic::AtomicU64>,
+        analysis: Option<Arc<crate::automix_track::Collector>>,
     ) -> Self {
         Self {
             inner,
@@ -174,6 +183,7 @@ impl Tapped {
             applies_volume,
             limiter: crate::limiter::Limiter::new(f64::from(SAMPLE_RATE)),
             normalisation,
+            analysis,
         }
     }
 }
@@ -220,6 +230,13 @@ impl Sink for Tapped {
                     1.0
                 };
                 self.tap.push(&samples, restore);
+                // The playing track's own audio, before volume: the beat
+                // grid must not move when the listener turns the knob.
+                if let Some(collector) = &self.analysis {
+                    let gathered: Vec<f32> =
+                        samples.iter().map(|sample| *sample as f32).collect();
+                    collector.push(&gathered);
+                }
                 let attenuation = self.volume.attenuation_factor();
                 if self.applies_volume {
                     for sample in &mut samples {

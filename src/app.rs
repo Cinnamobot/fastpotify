@@ -7495,11 +7495,14 @@ pub fn engine_config(
     EngineConfig {
         tap,
         eq,
+        analysis: (settings.crossfade_seconds > 0)
+            .then(|| crate::automix_track::Collector::new(crate::vis::SAMPLE_RATE)),
         device_name: settings.device_name.trim().to_string(),
         bitrate_kbps: settings.bitrate,
         normalisation: settings.normalisation,
         autoplay: settings.autoplay,
         gapless: settings.gapless,
+        crossfade: std::time::Duration::from_secs(u64::from(settings.crossfade_seconds.min(12))),
         backend: settings.platform_backend(),
         buffer_ms: settings.audio_buffer_ms,
         audio_device: settings

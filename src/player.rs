@@ -49,6 +49,9 @@ pub struct EngineConfig {
     pub normalisation: bool,
     pub autoplay: bool,
     pub gapless: bool,
+    /// Overlap the end of one track with the start of the next. `Duration::ZERO`
+    /// keeps tracks strictly sequential.
+    pub crossfade: Duration,
     pub backend: Option<String>,
     pub audio_device: Option<String>,
     pub initial_volume: u16,
@@ -60,6 +63,9 @@ pub struct EngineConfig {
     pub tap: Arc<AudioTap>,
     /// The equalizer's settings, shared with the window that sets them.
     pub eq: crate::eq::SharedEq,
+    /// Collects the playing track for automix's beat analysis, when automix
+    /// is on. `None` leaves the audio path untouched.
+    pub analysis: Option<Arc<crate::automix_track::Collector>>,
 }
 
 impl EngineConfig {
@@ -301,6 +307,7 @@ impl Engine {
         let player_config = PlayerConfig {
             bitrate: config.bitrate(),
             gapless: config.gapless,
+            crossfade: config.crossfade,
             normalisation: config.normalisation,
             normalisation_type: NormalisationType::Auto,
             position_update_interval: Some(Duration::from_secs(1)),
@@ -344,6 +351,8 @@ impl Engine {
             Arc::clone(&state),
             Arc::clone(&notify),
             Arc::clone(&audio),
+            crate::automix_driver::Automix::new(config.analysis.clone(), crate::vis::SAMPLE_RATE),
+            Arc::clone(&player),
         ));
 
         let connect_config = ConnectConfig {
@@ -623,6 +632,7 @@ fn sink_builder(
     let buffer_ms = config.buffer_ms;
     let tap = Arc::clone(&config.tap);
     let eq = Arc::clone(&config.eq);
+    let analysis = config.analysis.clone();
     let report: ErrorHook = Arc::new(move |message: String| {
         let snapshot = {
             let mut current = state.lock().unwrap_or_else(|p| p.into_inner());
@@ -642,11 +652,19 @@ fn sink_builder(
                 // volume, including at zero.
                 let applied = mixer.get_soft_volume();
                 let normalisation = Arc::clone(&normalisation);
+                let analysis = analysis.clone();
                 return (
                     Box::new(move || {
                         let sink = builder(device, AudioFormat::S16);
-                        Box::new(Tapped::new(sink, tap, applied, true, eq, normalisation))
-                            as Box<dyn Sink>
+                        Box::new(Tapped::new(
+                            sink,
+                            tap,
+                            applied,
+                            true,
+                            eq,
+                            normalisation,
+                            analysis,
+                        )) as Box<dyn Sink>
                     }),
                     Box::new(NoOpVolume),
                 );
@@ -661,7 +679,15 @@ fn sink_builder(
     (
         Box::new(move || {
             let sink = Box::new(RodioSink::new(device, report, volume, buffer_ms, audio));
-            Box::new(Tapped::new(sink, tap, ceiling, false, eq, normalisation)) as Box<dyn Sink>
+            Box::new(Tapped::new(
+                sink,
+                tap,
+                ceiling,
+                false,
+                eq,
+                normalisation,
+                analysis,
+            )) as Box<dyn Sink>
         }),
         Box::new(NoOpVolume),
     )
@@ -672,8 +698,14 @@ async fn run_events(
     state: Arc<Mutex<LocalState>>,
     notify: Notify,
     audio: Arc<AudioControl>,
+    automix: Option<crate::automix_driver::Automix>,
+    player: Arc<Player>,
 ) {
     let mut play_request_id = None;
+    let mut automix = automix;
+    // Automix needs the track to have played a while before its grid exists,
+    // so the check rides the same per-second position updates the interface
+    // already receives rather than a timer of its own.
     while let Some(event) = events.recv().await {
         if let PlayerEvent::PlayRequestIdChanged {
             play_request_id: next,
@@ -688,11 +720,18 @@ async fn run_events(
             continue;
         }
         match &event {
-            PlayerEvent::TrackChanged { .. } | PlayerEvent::Seeked { .. } => {
+            PlayerEvent::TrackChanged { .. } => {
                 audio.track_changed();
+                if let Some(automix) = &mut automix {
+                    automix.track_changed();
+                }
             }
+            PlayerEvent::Seeked { .. } => audio.track_changed(),
             PlayerEvent::Stopped { .. } => audio.stopped(),
             _ => {}
+        }
+        if let Some(automix) = &mut automix {
+            drive_automix(automix, &player, &state, &event);
         }
         let snapshot = {
             let mut current = state.lock().unwrap_or_else(|p| p.into_inner());
@@ -706,6 +745,59 @@ async fn run_events(
             notify(EngineEvent::State(snapshot));
         }
     }
+}
+
+/// Arms the coming boundary with a planned transition when one is ready.
+///
+/// Called as events arrive. Planning needs the outgoing track's grid and
+/// its length, and arming is only useful once per boundary, so the work is
+/// skipped when the player is not near one.
+fn drive_automix(
+    automix: &mut crate::automix_driver::Automix,
+    player: &Arc<Player>,
+    state: &Arc<Mutex<LocalState>>,
+    event: &PlayerEvent,
+) {
+    // Only position updates and track starts move this forward; anything
+    // else would just repeat the same decision.
+    if !matches!(
+        event,
+        PlayerEvent::PositionChanged { .. }
+            | PlayerEvent::PositionCorrection { .. }
+            | PlayerEvent::Playing { .. }
+    ) {
+        return;
+    }
+    let (elapsed, duration_ms) = {
+        let current = state.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(track) = current.track.as_ref() else {
+            return;
+        };
+        (
+            Duration::from_millis(u64::from(current.position_now())),
+            track.duration_ms,
+        )
+    };
+    automix.tick(crate::vis::SAMPLE_RATE);
+    let Some(planned) = automix.plan(elapsed, Duration::from_millis(u64::from(duration_ms))) else {
+        return;
+    };
+    let remaining = Duration::from_millis(u64::from(duration_ms)).saturating_sub(elapsed);
+    // Arm it only as the boundary comes into view. The plan's own lead-in
+    // decides when the crossfade fires, so arming early is harmless, but
+    // re-arming on every position update is not.
+    if remaining > planned.duration + Duration::from_secs(30) {
+        return;
+    }
+    let fade_out_before_end =
+        Duration::from_millis(u64::from(duration_ms)).saturating_sub(Duration::from_secs_f64(
+            planned.fade_out_at,
+        ));
+    player.set_crossfade_plan(Some(librespot_playback::player::CrossfadePlan {
+        duration: planned.duration,
+        fade_out_before_end,
+        fade_in_at: Duration::from_secs_f64(planned.fade_in_at),
+    }));
 }
 
 fn set<T: PartialEq>(target: &mut T, value: T) -> bool {
@@ -1247,11 +1339,13 @@ mod tests {
             buffer_ms: crate::sink::DEFAULT_BUFFER_MS,
             tap: AudioTap::new(),
             eq: crate::eq::shared(),
+            analysis: None,
             device_name: "Fastpotify".into(),
             bitrate_kbps: 320,
             normalisation: false,
             autoplay: true,
             gapless: true,
+            crossfade: Duration::ZERO,
             backend: None,
             audio_device: None,
             initial_volume: 1,

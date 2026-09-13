@@ -90,6 +90,9 @@ pub struct Settings {
     pub normalisation: bool,
     pub autoplay: bool,
     pub gapless: bool,
+    /// Seconds the end of one track overlaps the start of the next, 0 to
+    /// disable. Capped upstream by librespot's 12-second limit.
+    pub crossfade_seconds: u8,
     /// librespot backend name; `None` picks the platform default.
     pub audio_backend: Option<String>,
     pub audio_device: Option<String>,
@@ -205,6 +208,7 @@ impl Default for Settings {
             normalisation: false,
             autoplay: true,
             gapless: true,
+            crossfade_seconds: 0,
             audio_backend: None,
             audio_device: None,
             audio_buffer_ms: default_buffer_ms(),
