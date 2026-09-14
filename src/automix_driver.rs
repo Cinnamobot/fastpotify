@@ -100,27 +100,41 @@ impl Automix {
     /// away at the one instant it is needed, and the boundary plays as a
     /// plain cut instead.
     ///
-    /// Arming waits until the boundary is close, which is what gives the
-    /// incoming track's probe time to land. A plan made before the probe has
-    /// no tempo to match, and the probe's answer arrives too late to change
-    /// one that was already handed over.
+    /// A plan is revised, though, when the incoming track's grid arrives
+    /// after it was armed. Arming has to happen early — the player decides
+    /// when to preload the next track from the plan in hand, so a plan that
+    /// waited for the probe would never get one. The first plan therefore
+    /// carries no tempo matching, and this replaces it once the probe has
+    /// been analysed, which the early arming is what makes possible.
     pub fn take_plan_change(
         &mut self,
         elapsed: Duration,
         out_duration: Duration,
     ) -> Option<Option<automix::Transition>> {
-        if self.armed.is_some() {
+        let planned = self.plan(elapsed, out_duration)?;
+        // A plan armed before the incoming grid existed is provisional, and
+        // is replaced as soon as a matched one is available.
+        let provisional = self.armed.as_ref().is_some_and(|armed| {
+            armed.tempo_ratio == 1.0
+        }) && planned.tempo_ratio != 1.0;
+        if self.armed.is_some() && !provisional {
             return None;
         }
-        let planned = self.plan(elapsed, out_duration).filter(|transition| {
-            // The player fires when the track has less left than the later of
-            // the two lead-ins, so this is the moment the plan has to be in
-            // its hands by.
-            let lead_in = out_duration
-                .saturating_sub(Duration::from_secs_f64(transition.fade_out_at))
-                .max(transition.duration);
-            out_duration.saturating_sub(elapsed) <= lead_in + PLAN_SLACK
-        })?;
+        // Hold the first plan as soon as there is one: it is what tells the
+        // player the next track has to be fetched early enough to analyse.
+        let lead_in = out_duration
+            .saturating_sub(Duration::from_secs_f64(planned.fade_out_at))
+            .max(planned.duration);
+        let due = out_duration.saturating_sub(elapsed) <= lead_in + PLAN_SLACK;
+        if !due {
+            return None;
+        }
+        if provisional {
+            log::debug!(
+                "automix: revising the transition to {:.4}x now the incoming grid is in",
+                planned.tempo_ratio
+            );
+        }
         self.armed = Some(planned.clone());
         Some(Some(planned))
     }
@@ -420,6 +434,76 @@ mod tests {
         assert!(
             !automix.withdraw_plan(),
             "there is nothing left to withdraw"
+        );
+    }
+
+    /// The bug that kept the tempo rate pinned at 1.0: the player decides
+    /// when to preload the next track from the plan it is holding, so a plan
+    /// armed only once the probe had landed could never trigger the preload
+    /// that produces the probe. The order was circular, and the resolution
+    /// is to arm provisionally and revise.
+    ///
+    /// This pins both halves: a plan with no tempo matching is handed over
+    /// first, and it is replaced when a matched one becomes available.
+    #[test]
+    fn a_provisional_plan_is_revised_once_the_incoming_grid_arrives() {
+        let collector = Collector::new(44_100);
+        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
+        automix.playing = Some(
+            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
+        );
+
+        // Walk in from far out to the boundary and take the first plan that
+        // is handed over. The exact lead-in depends on where the exit lands,
+        // so pinning one instant would just encode that arithmetic.
+        let out = Duration::from_secs(240);
+        let mut first = None;
+        for remaining in (6..40).rev() {
+            let elapsed = out.saturating_sub(Duration::from_secs(remaining));
+            if let Some(change) = automix.take_plan_change(elapsed, out) {
+                first = Some((remaining, change));
+                break;
+            }
+        }
+        let Some((armed_at, Some(first))) = first else {
+            panic!("a provisional plan must be handed over before the boundary, got {first:?}");
+        };
+        assert_eq!(
+            first.tempo_ratio, 1.0,
+            "with one grid there is nothing to match"
+        );
+        assert!(
+            armed_at >= 10,
+            "armed with only {armed_at}s left, too late for the player to preload"
+        );
+
+        // The probe lands, at a different tempo.
+        automix.incoming(&crate::automix::Probe {
+            samples: clicks_at(135.0, 20.0, 44_100),
+            position_seconds: 0.0,
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline && automix.incoming_analysis().is_none() {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(automix.incoming_analysis().is_some(), "the probe produced a grid");
+
+        // Now a matched plan must replace the provisional one. Without this
+        // the transition fires at 1.0x and nothing is stretched.
+        let at = out.saturating_sub(Duration::from_secs(armed_at));
+        let revised = automix.take_plan_change(at, out);
+        let Some(Some(revised)) = revised else {
+            panic!("the matched plan must replace the provisional one, got {revised:?}");
+        };
+        assert_ne!(
+            revised.tempo_ratio, 1.0,
+            "the revised plan carries the pair's tempo ratio"
+        );
+
+        // And it settles: no further churn on every position update.
+        assert!(
+            automix.take_plan_change(at, out).is_none(),
+            "a settled plan must not be re-sent"
         );
     }
 
