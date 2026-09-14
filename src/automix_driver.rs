@@ -151,8 +151,7 @@ impl Automix {
         // the playing grid is: without it the incoming bars are read as if
         // the track began at the probe.
         let incoming = incoming.map(|to| to.anchored_at(self.incoming_from));
-        automix::plan_exit_matched(&anchored, incoming.as_ref(), out_duration)
-            .filter(|transition| transition.fade_out_at >= elapsed.as_secs_f64())
+        automix::plan_exit_matched(&anchored, incoming.as_ref(), out_duration, elapsed.as_secs_f64())
     }
 }
 

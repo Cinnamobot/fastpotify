@@ -314,7 +314,7 @@ pub fn plan_exit(from: &Analysis, out_duration: Duration) -> Option<Transition> 
 /// taken from there when `bar_loudness` has a span that fits the overlap
 /// and still leaves the outgoing track playing afterwards.
 pub fn plan_exit_for(from: &Analysis, out_duration: Duration) -> Option<Transition> {
-    plan_exit_matched(from, None, out_duration)
+    plan_exit_matched(from, None, out_duration, 0.0)
 }
 
 /// Plan an exit knowing the incoming track's grid as well.
@@ -324,12 +324,20 @@ pub fn plan_exit_for(from: &Analysis, out_duration: Duration) -> Option<Transiti
 /// starts the incoming track on a downbeat of its own. `incoming` must
 /// already be anchored in its track's time.
 ///
+/// `earliest` is where the play head is now, and no exit before it is worth
+/// planning. That matters because the analysis covers a window of the track
+/// rather than the whole of it: the loudest span it finds is the loudest part
+/// *it heard*, which for a track played from the start is an early chorus.
+/// Without this, the planner would keep proposing an exit hundreds of
+/// seconds behind the play head and never arm anything.
+///
 /// Returns `None` when the two tempos are too far apart to stretch across,
 /// so an unmatched pair falls back to a plain exit rather than a smear.
 pub fn plan_exit_matched(
     from: &Analysis,
     incoming: Option<&Analysis>,
     out_duration: Duration,
+    earliest: f64,
 ) -> Option<Transition> {
     // Match the tempos. A factor near 0.5 or 2.0 is the same groove at half
     // or double time, so fold those in before judging the gap.
@@ -371,7 +379,8 @@ pub fn plan_exit_matched(
         // so the overlap is not simply the track ending.
         let chorus_exit = from
             .loudest_span(from.bar_loudness(), bars as usize)
-            .filter(|exit| *exit + seconds + slack <= end_of_track);
+            .filter(|exit| *exit + seconds + slack <= end_of_track)
+            .filter(|exit| *exit >= earliest);
 
         let latest_start = end_of_track - seconds - slack;
         if latest_start <= from.first_beat && chorus_exit.is_none() {
@@ -379,7 +388,8 @@ pub fn plan_exit_matched(
         }
 
         let preferred = chorus_exit.or_else(|| from.downbeat_at_or_before(latest_start));
-        let Some(fade_out_at) = preferred else {
+        // A track already past its own outro has nowhere left to fade from.
+        let Some(fade_out_at) = preferred.filter(|exit| *exit >= earliest) else {
             continue;
         };
         return Some(Transition {
@@ -403,7 +413,7 @@ pub fn plan_exit_matched(
 /// tempo gap too wide to stretch across, or a track too short to fade. The
 /// caller then uses a plain crossfade.
 pub fn plan(from: &Analysis, to: &Analysis, out_duration: Duration) -> Option<Transition> {
-    plan_exit_matched(from, Some(to), out_duration)
+    plan_exit_matched(from, Some(to), out_duration, 0.0)
 }
 
 /// Fold a tempo ratio into the octave nearest 1.0.
@@ -636,6 +646,17 @@ mod tests {
             consumed <= 40.0,
             "the tail needs {consumed:.2}s of a 40s track"
         );
+    }
+
+    /// The exit must still be planned when the play head is inside the
+    /// window the analysis covered, which is the normal case near a real
+    /// track's end.
+    #[test]
+    fn an_exit_ahead_of_the_play_head_is_planned() {
+        let a = Analysis::of(&click_track(128.0, 60.0, 44_100), 44_100).unwrap();
+        let planned = plan_exit_matched(&a, None, Duration::from_secs(300), 100.0)
+            .expect("a track with room ahead still plans");
+        assert!(planned.fade_out_at >= 100.0);
     }
 
     #[test]
