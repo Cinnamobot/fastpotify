@@ -76,6 +76,13 @@ impl Automix {
         self.armed = None;
     }
 
+    /// Takes back an armed plan whose boundary is no longer the one it was
+    /// made for, so a track change or a seek does not leave it to fire at
+    /// the wrong moment. Returns whether the player has to be told.
+    pub fn withdraw_plan(&mut self) -> bool {
+        std::mem::take(&mut self.armed).is_some()
+    }
+
     /// Called after a seek. The track is unchanged, so a finished grid still
     /// describes it, but the collected audio now has a jump in it and must
     /// not be tracked as if it were continuous.
@@ -87,34 +94,41 @@ impl Automix {
     /// The transition to hand the player for the coming boundary, or `None`
     /// when the boundary should keep the player's own crossfade.
     ///
-    /// Until this returns `Some`, the player's plain crossfade governs, so
-    /// this must also be able to take a transition back: a plan armed before
-    /// the incoming track's grid was ready has no tempo to match, and a
-    /// stale one would fire with the wrong ratio long after the probe has
-    /// produced a better answer.
+    /// A plan is armed once, near the boundary, and then left alone. It must
+    /// not be withdrawn as the play head reaches it: the exit is the moment
+    /// the transition starts, so re-deciding on the way there takes the plan
+    /// away at the one instant it is needed, and the boundary plays as a
+    /// plain cut instead.
+    ///
+    /// Arming waits until the boundary is close, which is what gives the
+    /// incoming track's probe time to land. A plan made before the probe has
+    /// no tempo to match, and the probe's answer arrives too late to change
+    /// one that was already handed over.
     pub fn take_plan_change(
         &mut self,
         elapsed: Duration,
         out_duration: Duration,
     ) -> Option<Option<automix::Transition>> {
-        // Wait until the boundary is close before deciding. This is also
-        // what gives the probe time to land: it is taken when the track is
-        // preloaded, which happens nearer the boundary than the arming used
-        // to fire, and a plan made without it has no tempo to match.
+        if self.armed.is_some() {
+            return None;
+        }
         let planned = self.plan(elapsed, out_duration).filter(|transition| {
             // The player fires when the track has less left than the later of
-            // the two lead-ins, so this is the moment the plan must be in its
-            // hands by.
+            // the two lead-ins, so this is the moment the plan has to be in
+            // its hands by.
             let lead_in = out_duration
                 .saturating_sub(Duration::from_secs_f64(transition.fade_out_at))
                 .max(transition.duration);
             out_duration.saturating_sub(elapsed) <= lead_in + PLAN_SLACK
-        });
-        if planned == self.armed {
-            return None;
-        }
-        self.armed = planned;
-        Some(planned)
+        })?;
+        self.armed = Some(planned.clone());
+        Some(Some(planned))
+    }
+
+    /// The plan the player is holding, so the host can tell whether one
+    /// still needs taking back when the track changes.
+    pub fn armed(&self) -> Option<&automix::Transition> {
+        self.armed.as_ref()
     }
 
     /// Receives the opening of the track being preloaded, so the transition
@@ -365,12 +379,29 @@ mod tests {
                 .is_none(),
             "an unchanged plan must not be re-sent"
         );
+
+        // Reaching the exit must not take the plan away. The exit is the
+        // moment the transition starts, so withdrawing it here would turn
+        // the boundary into a plain cut — which is what used to happen.
+        let at_exit = Duration::from_millis(240_000 - 1_000);
+        for elapsed in [near, at_exit] {
+            assert!(
+                automix
+                    .take_plan_change(elapsed, Duration::from_secs(240))
+                    .is_none(),
+                "an armed plan was disturbed at {elapsed:?}"
+            );
+        }
+        assert!(
+            automix.armed().is_some(),
+            "the plan must still be armed as the boundary arrives"
+        );
     }
 
-    /// A plan that stops being wanted must be taken back, or the player keeps
-    /// firing a transition nobody chose.
+    /// A plan must be taken back when its boundary is gone — a track change
+    /// or a seek — or the player keeps firing a transition nobody chose.
     #[test]
-    fn a_plan_can_be_withdrawn() {
+    fn a_plan_is_taken_back_when_the_track_moves_on() {
         let collector = Collector::new(44_100);
         let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
         automix.playing = Some(
@@ -381,11 +412,14 @@ mod tests {
             automix.take_plan_change(near, Duration::from_secs(240)),
             Some(Some(_))
         ));
-        // The track turns out to have no room after all.
-        assert_eq!(
-            automix.take_plan_change(near, Duration::from_secs(2)),
-            Some(None),
-            "the withdrawn plan must reach the player"
+        assert!(automix.armed().is_some());
+
+        // The track changes, so the armed boundary is no longer this track's.
+        assert!(automix.withdraw_plan(), "the player has to be told");
+        assert!(automix.armed().is_none());
+        assert!(
+            !automix.withdraw_plan(),
+            "there is nothing left to withdraw"
         );
     }
 

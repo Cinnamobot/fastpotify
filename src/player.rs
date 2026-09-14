@@ -723,12 +723,21 @@ async fn run_events(
             PlayerEvent::TrackChanged { .. } => {
                 audio.track_changed();
                 if let Some(automix) = &mut automix {
+                    // The player may still be holding the plan for the
+                    // boundary that just passed, and a new track has no use
+                    // for it.
+                    if automix.withdraw_plan() {
+                        player.set_crossfade_plan(None);
+                    }
                     automix.track_changed();
                 }
             }
             PlayerEvent::Seeked { .. } => {
                 audio.track_changed();
                 if let Some(automix) = &mut automix {
+                    if automix.withdraw_plan() {
+                        player.set_crossfade_plan(None);
+                    }
                     automix.seeked();
                 }
             }
@@ -791,8 +800,7 @@ fn drive_automix(
     };
     let out_duration = Duration::from_millis(u64::from(duration_ms));
     automix.tick(crate::vis::SAMPLE_RATE, elapsed);
-    // `None` means nothing changed; `Some(None)` withdraws a plan that is no
-    // longer wanted, and `Some(Some(..))` arms one.
+    // `None` means the plan is unchanged; `Some(..)` arms one, once.
     let Some(planned) = automix.take_plan_change(elapsed, out_duration) else {
         return;
     };
