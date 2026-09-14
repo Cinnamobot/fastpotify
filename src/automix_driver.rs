@@ -218,6 +218,18 @@ impl Automix {
                     "automix: structure re-read, now covering {:.0}s of the track",
                     analysis.analysed_until().unwrap_or(0.0)
                 );
+                let sections = analysis.loud_sections();
+                if !sections.is_empty() {
+                    log::debug!(
+                        "automix: {} loud section(s) found: {}",
+                        sections.len(),
+                        sections
+                            .iter()
+                            .map(|section| format!("{:.0}-{:.0}s", section.start, section.end))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
             }
             self.playing = Some(analysis);
             return;
@@ -401,26 +413,32 @@ mod tests {
         );
     }
 
-    /// A pair too far apart in tempo is refused rather than smeared, so the
-    /// boundary falls back to the plain crossfade even though both grids are
-    /// known.
+    /// The grid on its own is no longer a reason to refuse a pair: folding
+    /// and the shared sweep make every tempo mixable, so even 128 against
+    /// 176 BPM — a gap far past what one deck could stretch — arms a
+    /// transition rather than leaving the boundary to a plain cut.
     #[test]
-    fn a_hopeless_pair_falls_back_to_the_plain_crossfade() {
+    fn a_wide_tempo_gap_still_arms_a_matched_transition() {
         let collector = Collector::new(44_100);
         let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
         automix.playing = Some(
             Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
         );
-        // 128 against 176 BPM is far past the stretch limit.
         automix.incoming = Some((
             Analysis::of(&clicks_at(176.0, 20.0, 44_100), 44_100).expect("analysable"),
             0.0,
         ));
+        let planned = automix
+            .plan(Duration::from_secs(0), Duration::from_secs(240))
+            .expect("a wide gap is still mixable");
+        assert_ne!(
+            planned.tempo_ratio, 1.0,
+            "the pair has to be matched, not left plain"
+        );
         assert!(
-            automix
-                .plan(Duration::from_secs(0), Duration::from_secs(240))
-                .is_none(),
-            "an unmixable pair must not be armed"
+            (planned.tempo_ratio - 1.0).abs() <= automix::MAX_FOLDED_GAP + 1e-9,
+            "the ratio left the band the decks can share: {}",
+            planned.tempo_ratio
         );
     }
 

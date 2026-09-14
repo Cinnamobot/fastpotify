@@ -21,10 +21,19 @@ use timestretch::BeatGrid;
 /// planner keeps to.
 pub const MAX_TRANSITION: Duration = Duration::from_secs(12);
 
-/// Refuse a pair whose tempos differ by more than this, as a fraction. The
-/// server's own published recipes stay inside roughly ±7.6%, so matching
-/// that keeps our output in the range listeners already accept.
-pub const MAX_TEMPO_DIFF: f64 = 0.08;
+/// The widest gap a folded pair can have, and so the most the two decks ever
+/// have to share between them.
+///
+/// The octave fold picks the nearest power of two within two octaves of the
+/// raw ratio, and any two candidates differ by a factor of two — so the worst
+/// case is the ratio equally far from both, at `4/3`. Folding that down gives
+/// `2/3`, a gap of one third, and no pair inside the fold's two-octave reach
+/// can be wider. That is why no pair has to be refused on tempo.
+///
+/// The precondition is the two-octave reach: a pair 4× apart is at the edge
+/// (60 against 240 BPM), and anything past it is a tempo ratio no two real
+/// tracks have.
+pub const MAX_FOLDED_GAP: f64 = 1.0 / 3.0;
 
 /// Bars a transition may run, longest first. The server's recipes use 4
 /// mostly and 2 for tighter pairs; 8 covers slow tracks where 4 bars would
@@ -521,7 +530,7 @@ impl Analysis {
     }
 }
 
-/// Where each deck goes and how far one is stretched, for one pair.
+/// Where each deck goes and how far the pair is stretched, for one pair.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transition {
     /// Seconds into the outgoing track where its fade starts.
@@ -530,11 +539,23 @@ pub struct Transition {
     pub fade_in_at: f64,
     /// How long the two overlap.
     pub duration: Duration,
-    /// The rate the outgoing tail is played at, with its pitch held: the
-    /// incoming tempo over the outgoing one, folded to the nearest octave.
-    /// The outgoing track is the one stretched, because its beats are the
-    /// ones that have to move onto the incoming track's grid before it fades
-    /// away.
+    /// How much faster the incoming track's groove is than the outgoing
+    /// one's, folded to the nearest octave.
+    ///
+    /// Both decks move onto a shared tempo across the overlap, because the
+    /// two are locked to each other: if one deck plays a beat, the other has
+    /// to be playing a beat at the same moment, so their playback rates can
+    /// never be set independently. Writing `c(t)` for the shared tempo as a
+    /// fraction of the outgoing track's own, and `r` for this ratio, the
+    /// rates are `c(t)` on the outgoing deck and `c(t) / r` on the incoming
+    /// one — a constant quotient of `r`, which is what keeps them locked.
+    ///
+    /// `c` runs from `1.0` to `r` over the overlap: it starts on the
+    /// outgoing track's tempo, so the track the listener is already hearing
+    /// never changes speed, and it ends on the incoming track's, so that one
+    /// arrives at its own tempo and stays there. The stretch therefore
+    /// migrates from the incoming deck to the outgoing one, and each deck is
+    /// at its natural rate exactly when it is loudest.
     pub tempo_ratio: f64,
 }
 
@@ -579,8 +600,9 @@ pub fn plan_exit_for(from: &Analysis, out_duration: Duration) -> Option<Transiti
 /// Without this, the planner would keep proposing an exit hundreds of
 /// seconds behind the play head and never arm anything.
 ///
-/// Returns `None` when the two tempos are too far apart to stretch across,
-/// so an unmatched pair falls back to a plain exit rather than a smear.
+/// Returns `None` only when the outgoing track has no room left to fade in,
+/// which is a property of that track alone; the pair's tempos cannot make it
+/// fail, because [`fold_octave`] always brings them within reach.
 pub fn plan_exit_matched(
     from: &Analysis,
     incoming: Option<&Analysis>,
@@ -588,21 +610,9 @@ pub fn plan_exit_matched(
     earliest: f64,
 ) -> Option<Transition> {
     // Match the tempos. A factor near 0.5 or 2.0 is the same groove at half
-    // or double time, so fold those in before judging the gap.
-    let tempo_ratio = match incoming {
-        Some(to) => {
-            let ratio = fold_octave(to.bpm / from.bpm);
-            if (ratio - 1.0).abs() > MAX_TEMPO_DIFF {
-                // Refused rather than smeared. The caller sees `None` and the
-                // boundary keeps the player's own crossfade. Not logged here:
-                // this runs on every position update, and the caller reports
-                // the outcome once it has decided.
-                return None;
-            }
-            ratio
-        }
-        None => 1.0,
-    };
+    // or double time, so fold those in: what is left is a stretch both decks
+    // can share, whatever the pair.
+    let tempo_ratio = incoming.map_or(1.0, |to| fold_octave(to.bpm / from.bpm));
     let beat_seconds = 60.0 / from.bpm;
     for bars in BAR_CHOICES {
         // `seconds` is how much of the outgoing track the overlap eats, and
@@ -692,13 +702,16 @@ pub fn plan(from: &Analysis, to: &Analysis, out_duration: Duration) -> Option<Tr
 
 /// Fold a tempo ratio into the octave nearest 1.0.
 ///
-/// A pair 1.9× apart is the same groove at double time and folds to 0.95,
-/// which keylock handles. This is what the server does under
+/// A pair 1.9× apart is the same groove at double time and folds to 0.95.
+/// This is what the server does under
 /// `auto_transition_allow_octave_bpm_correction`.
 ///
-/// Folding only helps when one tempo is near a multiple of the other. 136
-/// against 80 is 1.7, whose nearest octave is 0.85 — still 15% off, so the
-/// pair is refused here just as the server refuses it.
+/// Folding is also what makes every pair mixable. For any ratio the nearest
+/// power of two is within a factor of `sqrt(2)`, so the folded ratio lands in
+/// `[1/sqrt(2), sqrt(2)]` — a gap of at most 29.3%, and it is exactly that at
+/// the worst case of `sqrt(2)`. Half of that on each deck is under 16%, well
+/// inside what keylock holds, so no tempo gap is ever past stretching and no
+/// caller has to refuse one.
 fn fold_octave(ratio: f64) -> f64 {
     if !(ratio.is_finite() && ratio > 0.0) {
         return 1.0;
@@ -1146,24 +1159,88 @@ mod tests {
 
     #[test]
     fn octave_folding_rescues_a_ratio_that_is_otherwise_hopeless() {
-        // 1.9x is far outside the limit, but double time is the same groove.
+        // 1.9x is the same groove at double time, so it folds to 0.95.
         let raw: f64 = 1.9;
-        assert!((raw - 1.0).abs() > MAX_TEMPO_DIFF);
         let folded = fold_octave(raw);
         assert!(
             (folded - 0.95).abs() < 1e-9,
             "1.9 should fold down to 0.95, got {folded}"
         );
-        assert!((folded - 1.0).abs() <= MAX_TEMPO_DIFF);
+        assert!((folded - 1.0).abs() <= MAX_FOLDED_GAP);
     }
 
+    /// The reason no pair has to be refused: inside the fold's reach the gap
+    /// it leaves is never wider than the two decks can share between them.
     #[test]
-    fn folding_does_not_rescue_a_ratio_outside_every_octave() {
-        // 136 against 80 is 1.7, and its nearest octave is 0.85: still a 15%
-        // stretch. The server refuses this pair too, returning a zero-bar
-        // recipe, so refusing it here matches what listeners already get.
-        let raw: f64 = 136.0 / 80.0;
-        assert!((fold_octave(raw) - 1.0).abs() > MAX_TEMPO_DIFF);
+    fn folding_always_lands_inside_what_the_decks_can_share() {
+        // The fold searches two octaves either way, so every ratio from 1/4
+        // to 4 is reachable — 60 against 240 BPM spans that whole range, and
+        // no two real tracks are wider apart than those.
+        let mut worst: f64 = 0.0;
+        let mut worst_at: f64 = 0.0;
+        for step in 0..=40_000 {
+            let raw = 0.25 + f64::from(step) * (3.75 / 40_000.0);
+            let gap = (fold_octave(raw) - 1.0).abs();
+            assert!(
+                gap <= MAX_FOLDED_GAP + 1e-9,
+                "{raw} folded to a gap of {gap}, past the {MAX_FOLDED_GAP} the decks can share"
+            );
+            if gap > worst {
+                worst = gap;
+                worst_at = raw;
+            }
+        }
+        // The bound has to be tight, or it is not describing anything. It is
+        // reached where a ratio sits exactly between two octaves and either
+        // way leaves a third: 4/3 and 8/3 both do.
+        assert!(
+            (worst - MAX_FOLDED_GAP).abs() < 1e-4,
+            "the sweep never reached the bound ({worst} against {MAX_FOLDED_GAP})"
+        );
+        assert!(
+            (worst_at - 4.0 / 3.0).abs() < 1e-3 || (worst_at - 8.0 / 3.0).abs() < 1e-3,
+            "the worst fold came from {worst_at}, which is not one of the between-octaves ties"
+        );
+    }
+
+    /// The stretch sits on whichever deck is quietest, which is what makes a
+    /// shared sweep sound better than stretching one deck outright: each
+    /// deck drifts away from its own tempo only as it fades, and is at its
+    /// own tempo at the moment it owns the mix.
+    #[test]
+    fn each_deck_drifts_only_as_it_fades() {
+        let folded = fold_octave(1.3333);
+        let sweep = |progress: f64| {
+            let up = folded.powf(progress);
+            (up, up / folded)
+        };
+
+        // The outgoing deck starts at its own tempo and is pulled away as it
+        // hands over, so its deviation only grows.
+        let mut previous = 0.0;
+        for step in 0..=20 {
+            let (up, _) = sweep(f64::from(step) / 20.0);
+            let deviation = (up - 1.0).abs();
+            assert!(
+                deviation >= previous - 1e-9,
+                "the outgoing deck came back towards its own tempo mid-fade"
+            );
+            previous = deviation;
+        }
+
+        // The incoming deck is the mirror of that: furthest from its own
+        // tempo while it is inaudible, and settled on it by the time it owns
+        // the mix.
+        let mut previous = f64::INFINITY;
+        for step in 0..=20 {
+            let (_, across) = sweep(f64::from(step) / 20.0);
+            let deviation = (across - 1.0).abs();
+            assert!(
+                deviation <= previous + 1e-9,
+                "the incoming deck drifted further off as it grew louder"
+            );
+            previous = deviation;
+        }
     }
 
     #[test]
@@ -1235,7 +1312,7 @@ mod tests {
         let planned = plan(&a, &b, Duration::from_secs(40)).expect("matched tempos mix");
         assert!(planned.duration >= MIN_TRANSITION);
         assert!(planned.duration <= MAX_TRANSITION);
-        assert!((planned.tempo_ratio - 1.0).abs() <= MAX_TEMPO_DIFF);
+        assert!((planned.tempo_ratio - 1.0).abs() <= MAX_FOLDED_GAP);
         // The fade has to finish before the outgoing track does.
         assert!(planned.fade_out_at + planned.duration.as_secs_f64() <= 40.0);
     }
@@ -1348,12 +1425,35 @@ mod tests {
         );
     }
 
+    /// A pair whose raw tempos look hopeless is still mixable: folding brings
+    /// them into the band the two decks can share, so the transition is
+    /// planned and matched rather than refused.
     #[test]
-    fn a_pair_with_a_hopeless_tempo_gap_is_refused() {
+    fn a_pair_that_looks_hopeless_still_gets_a_transition() {
         let a = Analysis::of(&click_track(90.0, 40.0, 44_100), 44_100).unwrap();
-        // 90 against 150 folds to 1.2, past the stretch limit.
-        let b = Analysis::of(&click_track(150.0, 40.0, 44_100), 44_100).unwrap();
-        assert!(plan(&a, &b, Duration::from_secs(40)).is_none());
+        let b = Analysis::of(&click_track(120.0, 40.0, 44_100), 44_100).unwrap();
+        let raw = b.bpm / a.bpm;
+        let planned = plan(&a, &b, Duration::from_secs(40)).expect("every pair is mixable");
+
+        // The point of the test: the raw quotient is outside the shareable
+        // band, so planning at all means folding happened.
+        assert!(
+            (raw - 1.0).abs() > MAX_FOLDED_GAP,
+            "the pair was not wide enough for this to prove anything: {raw}"
+        );
+        assert!(
+            (planned.tempo_ratio - 1.0).abs() <= MAX_FOLDED_GAP + 1e-9,
+            "the ratio left the band the decks can share: {}",
+            planned.tempo_ratio
+        );
+        assert_ne!(
+            planned.tempo_ratio, 1.0,
+            "the pair has to be matched, not left plain"
+        );
+        assert!(
+            (planned.tempo_ratio - fold_octave(raw)).abs() < 1e-9,
+            "the ratio must be the folded quotient of the measured tempos"
+        );
     }
 
     #[test]
