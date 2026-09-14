@@ -39,6 +39,60 @@ const MIN_TRANSITION: Duration = Duration::from_millis(1_500);
 /// to a doubtful beat is worse than a plain crossfade.
 const MIN_CONFIDENCE: f32 = 0.35;
 
+/// How much the top band must rise against the middle one, relative to the
+/// track's own median, for a stretch to count as a chorus.
+///
+/// Measured on synthetic verse/chorus material the ratio nearly triples
+/// across the boundary, so this sits well clear of noise while still
+/// catching a chorus that is mixed subtly.
+const LOUD_PROMINENCE: f64 = 1.35;
+
+/// Seconds the band ratio is smoothed over before it is thresholded.
+const LOUD_SMOOTH_SECONDS: f64 = 2.0;
+
+/// Shortest stretch that can be a chorus.
+const MIN_LOUD_SECONDS: f64 = 6.0;
+
+/// Gaps shorter than this inside a loud stretch are bridged, so a chorus
+/// that dips for a bar is one section rather than two.
+const LOUD_MERGE_GAP_SECONDS: f64 = 3.0;
+
+/// Fewest envelope readings worth looking at; below this there is no
+/// structure to find and the answer would be noise.
+const MIN_SECTION_READINGS: usize = 200;
+
+/// A simple centred moving average, with the ends left as they are.
+fn moving_average(values: &[f64], window: usize) -> Vec<f64> {
+    if window <= 1 || values.len() < window {
+        return values.to_vec();
+    }
+    let half = window / 2;
+    (0..values.len())
+        .map(|index| {
+            let start = index.saturating_sub(half);
+            let end = (index + half + 1).min(values.len());
+            values[start..end].iter().sum::<f64>() / (end - start) as f64
+        })
+        .collect()
+}
+
+/// Joins sections separated by a gap shorter than `gap`.
+fn merge_close_sections(sections: &mut Vec<LoudSection>, gap: f64) {
+    if sections.len() < 2 {
+        return;
+    }
+    let mut merged: Vec<LoudSection> = Vec::with_capacity(sections.len());
+    for section in sections.drain(..) {
+        match merged.last_mut() {
+            Some(previous) if section.start - previous.end <= gap => {
+                previous.end = previous.end.max(section.end);
+            }
+            _ => merged.push(section),
+        }
+    }
+    *sections = merged;
+}
+
 /// Beats in a bar. The tracker does not report a time signature, and four is
 /// what nearly all the material Spotify mixes uses.
 const BEATS_PER_BAR: f64 = 4.0;
@@ -77,6 +131,23 @@ pub struct Analysis {
     pub offset_in_track: f64,
     /// Per-bar loudness of the analysed audio, for finding the chorus.
     bar_loudness: Vec<f64>,
+    /// Where the track's loud sections are, in track time, when they could
+    /// be told from the rest by how the signal is balanced across bands.
+    ///
+    /// A transition wants both edges of one of these: it leaves just after a
+    /// chorus ends, and brings the next track in just before one begins.
+    /// Loudness alone cannot find them, because a chorus is not merely
+    /// louder — it is balanced differently.
+    loud_sections: Vec<LoudSection>,
+}
+
+/// A stretch of a track that stands out as its chorus or drop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LoudSection {
+    /// Seconds into the track where it begins.
+    pub start: f64,
+    /// Seconds into the track where it ends.
+    pub end: f64,
 }
 
 impl Analysis {
@@ -143,6 +214,100 @@ impl Analysis {
         self.bar_loudness = self.measure_envelope_loudness(envelope);
     }
 
+    /// Re-reads the structure from the per-band readings, which is what can
+    /// tell a chorus from a verse.
+    pub fn refresh_bands(&mut self, bands: &[Vec<f64>; crate::automix_track::NUM_BANDS]) {
+        self.loud_sections = self.find_loud_sections(bands);
+    }
+
+    /// Where the track's choruses are, in track time.
+    pub fn loud_sections(&self) -> &[LoudSection] {
+        &self.loud_sections
+    }
+
+    /// The last chorus that has already finished by `now`, if there is one.
+    ///
+    /// A transition leaves just after a chorus rather than in the middle of
+    /// one, so the caller wants the end of the latest section that is over.
+    pub fn chorus_ended_by(&self, now: f64) -> Option<LoudSection> {
+        self.loud_sections
+            .iter()
+            .filter(|section| section.end <= now)
+            .next_back()
+            .copied()
+    }
+
+    /// The first chorus that starts at or after `from`.
+    ///
+    /// The incoming track is brought in ahead of this, so its chorus lands
+    /// after the overlap rather than inside it.
+    pub fn chorus_starting_after(&self, from: f64) -> Option<LoudSection> {
+        self.loud_sections
+            .iter()
+            .find(|section| section.start >= from)
+            .copied()
+    }
+
+    /// Finds the stretches that stand out by band balance rather than level.
+    ///
+    /// A chorus carries more kick and more cymbals than a verse while the
+    /// midrange makes room for the vocal, so the ratio of the top band to
+    /// the middle one rises sharply across it and falls back after. That
+    /// ratio is smoothed and thresholded against the track's own median, so
+    /// it holds for a loud master and a quiet one alike.
+    fn find_loud_sections(
+        &self,
+        bands: &[Vec<f64>; crate::automix_track::NUM_BANDS],
+    ) -> Vec<LoudSection> {
+        let [low, mid, high] = bands;
+        let readings = mid.len().min(high.len()).min(low.len());
+        if readings < MIN_SECTION_READINGS {
+            return Vec::new();
+        }
+        let hop = crate::automix_track::ENERGY_HOP_SECONDS;
+        // The ratio the chorus pushes up, smoothed over a couple of seconds
+        // so a single busy bar cannot open a section of its own.
+        let raw: Vec<f64> = (0..readings)
+            .map(|index| high[index] / mid[index].max(f64::MIN_POSITIVE))
+            .collect();
+        let window = (LOUD_SMOOTH_SECONDS / hop).round().max(1.0) as usize;
+        let smoothed = moving_average(&raw, window);
+        let mut sorted = smoothed.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = sorted[sorted.len() / 2];
+        if median <= f64::MIN_POSITIVE {
+            return Vec::new();
+        }
+        let threshold = median * LOUD_PROMINENCE;
+        // Walk the curve and keep the runs above the threshold, dropping
+        // ones too short to be a section. Level is not consulted at all:
+        // this is about balance, so a quiet chorus still counts.
+        let offset = self.offset_in_track;
+        let mut sections = Vec::new();
+        let mut run: Option<usize> = None;
+        for index in 0..=smoothed.len() {
+            let above = index < smoothed.len() && smoothed[index] >= threshold;
+            match (above, run) {
+                (true, None) => run = Some(index),
+                (false, Some(start)) => {
+                    let seconds = (index - start) as f64 * hop;
+                    if seconds >= MIN_LOUD_SECONDS {
+                        sections.push(LoudSection {
+                            start: offset + start as f64 * hop,
+                            end: offset + index as f64 * hop,
+                        });
+                    }
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        // Merge sections separated by a gap too short to be a real break,
+        // which happens when the ratio dips for a bar mid-chorus.
+        merge_close_sections(&mut sections, LOUD_MERGE_GAP_SECONDS);
+        sections
+    }
+
     /// The loudness profile of the audio this analysis came from.
     pub fn bar_loudness(&self) -> &[f64] {
         &self.bar_loudness
@@ -160,6 +325,7 @@ impl Analysis {
             bpm: grid.bpm,
             offset_in_track: 0.0,
             bar_loudness: Vec::new(),
+            loud_sections: Vec::new(),
             grid,
         })
     }
@@ -448,18 +614,24 @@ pub fn plan_exit_matched(
         let slack = beat_seconds * BEATS_PER_BAR;
         let end_of_track = out_duration.as_secs_f64();
 
-        // Where the chorus is, if the profile is deep enough to say. The
-        // span's exit is used, and it has to leave a bar of music after it
-        // so the overlap is not simply the track ending.
-        // The loudest span is the loudest part of the audio that was
-        // analysed, not of the track. Taking it as the exit is only sound
-        // when the analysis reached the end: a window that stopped early
-        // cannot see a later section, so a mid-track chorus would be mistaken
-        // for the last one and everything after it would be cut away.
+        // Leave from the end of the last chorus that has already finished.
+        // A transition should not run through the middle of one, and it
+        // should not wait for the outro either: the moment a chorus lands
+        // back into a verse is where the two tracks blend most easily.
+        //
+        // The chorus has to be one the analysis actually heard, so the
+        // search is bounded by `earliest` — the play head — rather than
+        // picking a section the track has already gone past.
         let chorus_exit = from
-            .analysed_until()
-            .filter(|until| *until + slack >= end_of_track)
-            .and_then(|_| from.loudest_span(from.bar_loudness(), bars as usize))
+            .chorus_ended_by(end_of_track - slack)
+            .filter(|section| section.end >= earliest)
+            .map(|section| section.end)
+            // Snap onto the grid, so the overlap still lands on a bar even
+            // though the section boundary is measured, not tracked.
+            .and_then(|end| {
+                from.downbeat_at_or_after(end)
+                    .or_else(|| from.downbeat_at_or_before(end))
+            })
             .filter(|exit| *exit + seconds + slack <= end_of_track)
             .filter(|exit| *exit >= earliest);
 
@@ -473,14 +645,23 @@ pub fn plan_exit_matched(
         let Some(fade_out_at) = preferred.filter(|exit| *exit >= earliest) else {
             continue;
         };
+        // Bring the incoming track in so its own chorus lands after the
+        // overlap rather than inside it: the arrival is placed just ahead of
+        // the next chorus, which is the moment the pair sounds like songs
+        // together instead of one fading under the other.
+        let fade_in_at = incoming
+            .and_then(|to| {
+                // The overlap is measured in the incoming track's time, so
+                // its chorus has to start at least that far in.
+                to.chorus_starting_after(overlap * 0.5)
+                    .map(|section| section.start - overlap)
+                    .or_else(|| to.downbeat_at_or_after(0.0))
+            })
+            .unwrap_or(0.0)
+            .max(0.0);
         return Some(Transition {
             fade_out_at,
-            // The incoming track starts on one of its own downbeats, so both
-            // tracks land their bar together instead of one sliding under
-            // the other.
-            fade_in_at: incoming
-                .and_then(|to| to.downbeat_at_or_after(0.0))
-                .unwrap_or(0.0),
+            fade_in_at,
             duration,
             tempo_ratio,
         });
@@ -642,41 +823,237 @@ mod tests {
         );
     }
 
-    /// The point of the whole-track envelope: with it, the planner can leave
-    /// after the track's *last* chorus rather than falling back to the outro,
-    /// and it still never leaves before a chorus has had its say.
+    /// The transition the whole design is for: leave just after a chorus
+    /// ends, and arrive just before the next one begins.
+    ///
+    /// The chorus has to end well before the track does, or the outro
+    /// fallback would land in the same place and the test could not tell
+    /// whether the chorus was used at all.
     #[test]
-    fn a_late_chorus_becomes_the_exit_rather_than_the_outro() {
-        // Chorus at 150-175s of a 200s track, so there is room to fade out
-        // after it and the outro is at 190s or so.
-        let samples = click_track_with_chorus(128.0, 200.0, 44_100, 150.0, 175.0);
-        let rate = 44_100;
-        let channels = crate::vis::CHANNELS as usize;
-        let window = (crate::automix_track::ANALYSED_SECONDS * f64::from(rate)) as usize * channels;
-        let opening = &samples[..window.min(samples.len())];
+    fn the_pair_meets_at_the_chorus_edges() {
+        // The outgoing track: a chorus at 40-60s, a second at 70-90s, then a
+        // long outro to 140s. Leaving after the chorus is around 90s;
+        // leaving at the outro would be around 130s.
+        let out_bands = band_envelope(&[
+            ("intro", 8.0),
+            ("verse", 32.0),
+            ("chorus", 20.0),
+            ("verse", 10.0),
+            ("chorus", 20.0),
+            ("outro", 50.0),
+        ]);
+        let mut from = Analysis::of(&click_track(128.0, 40.0, 44_100), 44_100).expect("a grid");
+        from.refresh_bands(&out_bands);
 
-        let envelope = crate::automix_track::envelope_of(&samples);
-        let with_envelope =
-            Analysis::of_with_envelope(opening, rate, &envelope).expect("analysable");
-        let planned = plan_exit_matched(
-            &with_envelope,
-            None,
-            Duration::from_secs(200),
-            0.0,
-        )
-        .expect("a 200s track has room");
+        // The incoming track: its chorus starts at 50s.
+        let in_bands = band_envelope(&[("intro", 5.0), ("verse", 45.0), ("chorus", 20.0)]);
+        let mut to = Analysis::of(&click_track(128.0, 50.0, 44_100), 44_100).expect("a grid");
+        to.refresh_bands(&in_bands);
 
-        // The exit lands on or after the chorus, never inside it.
+        let planned = plan_exit_matched(&from, Some(&to), Duration::from_secs(140), 0.0)
+            .expect("the pair is mixable");
+
+        // It leaves after the second chorus, not at the outro: this is what
+        // separates a chorus exit from the fallback.
+        let exit = planned.fade_out_at;
         assert!(
-            planned.fade_out_at >= 175.0,
-            "the fade must not start inside the chorus: exit at {:.1}s",
-            planned.fade_out_at
+            (88.0..110.0).contains(&exit),
+            "the exit at {exit:.1}s should follow the second chorus (ends ~90s), \
+             where the outro fallback would be near 130s"
         );
-        // ...and it is not dragged all the way to the outro for no reason.
+        // It arrives ahead of the incoming chorus, so its lift is not buried
+        // under the outgoing track.
+        let arrival = planned.fade_in_at;
         assert!(
-            planned.fade_out_at < 195.0,
-            "the chorus exit should be used, got {:.1}s",
-            planned.fade_out_at
+            arrival < 50.0,
+            "the arrival at {arrival:.1}s should precede the chorus at 50s"
+        );
+        assert!(
+            arrival + planned.duration.as_secs_f64() >= 45.0,
+            "the overlap should reach the chorus: arrives {arrival:.1}s for {:.1}s",
+            planned.duration.as_secs_f64()
+        );
+    }
+
+    /// A chorus is not simply louder: it is balanced differently, with more
+    /// kick and more cymbals. Total energy cannot see that, which is why the
+    /// band split exists — this pins that a signal with a kick and hats
+    /// lands its high band above its low-mid balance while a plain tone does
+    /// not.
+    #[test]
+    fn the_bands_tell_a_kick_and_hats_from_a_plain_tone() {
+        let rate = crate::vis::SAMPLE_RATE;
+        let seconds = 2.0;
+        let frames = (seconds * f64::from(rate)) as usize;
+        const CHANNELS: usize = 2;
+
+        let plain: Vec<f32> = (0..frames)
+            .flat_map(|index| {
+                let t = index as f64 / f64::from(rate);
+                let value = (0.3 * (std::f64::consts::TAU * 440.0 * t).sin()) as f32;
+                [value; CHANNELS]
+            })
+            .collect();
+
+        // A kick and hats, as a chorus carries: 60 Hz and high noise.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let rich: Vec<f32> = (0..frames)
+            .flat_map(|index| {
+                let t = index as f64 / f64::from(rate);
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let noise = (seed >> 40) as f64 / 8_388_608.0 - 1.0;
+                let value = (0.3 * (std::f64::consts::TAU * 440.0 * t).sin()
+                    + 0.4 * (std::f64::consts::TAU * 60.0 * t).sin()
+                    + 0.15 * noise)
+                    as f32;
+                [value; CHANNELS]
+            })
+            .collect();
+
+        use crate::automix_track::envelope_with_bands;
+        let ratio = |samples: &[f32]| {
+            let (_, bands) = envelope_with_bands(samples);
+            let sum = |band: usize| bands[band].iter().sum::<f64>();
+            let low = sum(0);
+            let mid = sum(1);
+            let high = sum(2);
+            // The top band against the middle: a chorus leans high.
+            high / mid.max(f64::MIN_POSITIVE)
+        };
+
+        let plain_ratio = ratio(&plain);
+        let rich_ratio = ratio(&rich);
+        assert!(
+            rich_ratio > plain_ratio * 2.0,
+            "the kick-and-hats signal must lean high: {rich_ratio:.4} against {plain_ratio:.4}"
+        );
+    }
+
+    /// Builds a band envelope directly, so the detection can be tested
+    /// against a known structure without synthesising audio for it.
+    ///
+    /// `parts` are `(kind, seconds)` where the kind picks the band balance:
+    /// a chorus leans low and high with a dip in the middle, a verse leans
+    /// on the middle.
+    fn band_envelope(parts: &[(&str, f64)]) -> [Vec<f64>; 3] {
+        let hop = crate::automix_track::ENERGY_HOP_SECONDS;
+        let mut low = Vec::new();
+        let mut mid = Vec::new();
+        let mut high = Vec::new();
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut noise = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f64 / 8_388_608.0 - 1.0
+        };
+        for (kind, seconds) in parts {
+            let (l, m, h) = match *kind {
+                "chorus" => (1.35, 1.0, 1.35),
+                "intro" => (0.7, 0.8, 0.4),
+                "outro" => (0.6, 0.7, 0.35),
+                _ => (1.0, 1.3, 0.55),
+            };
+            for _ in 0..(seconds / hop) as usize {
+                low.push(l + noise() * 0.03);
+                mid.push(m + noise() * 0.03);
+                high.push(h + noise() * 0.03);
+            }
+        }
+        [low, mid, high]
+    }
+
+    /// The point of the band split: the planner needs both edges of a
+    /// chorus, because a transition leaves just after one ends and brings
+    /// the next track in just before one begins. Loudness cannot find them —
+    /// a chorus is balanced differently, not merely louder.
+    #[test]
+    fn a_chorus_is_found_by_band_balance_not_by_level() {
+        let bands = band_envelope(&[
+            ("intro", 10.0),
+            ("verse", 18.0),
+            ("chorus", 20.0),
+            ("verse", 18.0),
+            ("chorus", 20.0),
+            ("outro", 12.0),
+        ]);
+        let mut analysis =
+            Analysis::of(&click_track(128.0, 30.0, 44_100), 44_100).expect("a grid");
+        analysis.refresh_bands(&bands);
+
+        let sections = analysis.loud_sections();
+        assert_eq!(sections.len(), 2, "expected two choruses, got {sections:?}");
+        // Each chorus is found at its own boundaries, within a few seconds:
+        // the ratio is smoothed over two seconds, so the edges are soft.
+        for (section, expected) in sections.iter().zip([(28.0, 48.0), (66.0, 86.0)]) {
+            assert!(
+                (section.start - expected.0).abs() < 4.0,
+                "chorus start {:.1}s, expected about {:.1}s",
+                section.start,
+                expected.0
+            );
+            assert!(
+                (section.end - expected.1).abs() < 4.0,
+                "chorus end {:.1}s, expected about {:.1}s",
+                section.end,
+                expected.1
+            );
+        }
+    }
+
+    /// The two edges the transition actually uses: leave after the last
+    /// chorus that has finished, and arrive before the next one starts.
+    #[test]
+    fn the_two_chorus_edges_are_readable() {
+        let bands = band_envelope(&[
+            ("intro", 10.0),
+            ("verse", 18.0),
+            ("chorus", 20.0),
+            ("verse", 18.0),
+            ("chorus", 20.0),
+            ("outro", 12.0),
+        ]);
+        let mut analysis =
+            Analysis::of(&click_track(128.0, 30.0, 44_100), 44_100).expect("a grid");
+        analysis.refresh_bands(&bands);
+
+        // Partway through the second verse, the first chorus is the last one
+        // that has finished.
+        let ended = analysis
+            .chorus_ended_by(50.0)
+            .expect("the first chorus is over by 50s");
+        assert!(
+            (ended.end - 48.0).abs() < 4.0,
+            "the exit should follow the first chorus, got {:.1}s",
+            ended.end
+        );
+
+        // The incoming track is brought in ahead of a chorus, so it wants
+        // the one that starts next.
+        let next = analysis
+            .chorus_starting_after(50.0)
+            .expect("a chorus starts after 50s");
+        assert!(
+            (next.start - 66.0).abs() < 4.0,
+            "the arrival should precede the second chorus, got {:.1}s",
+            next.start
+        );
+    }
+
+    /// A track with no chorus at all must yield no sections rather than a
+    /// guess, so the caller falls back to an ordinary exit.
+    #[test]
+    fn a_track_with_no_chorus_reports_none() {
+        let bands = band_envelope(&[("intro", 10.0), ("verse", 40.0), ("outro", 10.0)]);
+        let mut analysis =
+            Analysis::of(&click_track(128.0, 30.0, 44_100), 44_100).expect("a grid");
+        analysis.refresh_bands(&bands);
+        assert!(
+            analysis.loud_sections().is_empty(),
+            "expected no chorus, got {:?}",
+            analysis.loud_sections()
         );
     }
 

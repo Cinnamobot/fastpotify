@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::automix::{self, Analysis};
-use crate::automix_track::{Collector, Worker, envelope_of};
+use crate::automix_track::{Collector, Worker, envelope_with_bands};
 
 /// How long before a transition's own lead-in the plan is armed, so a slow
 /// decode or a late probe still has time to change the decision.
@@ -168,8 +168,9 @@ impl Automix {
         // The probe's own audio is all there is of the incoming track, so
         // its envelope is measured from it directly rather than collected
         // from the sink the way the playing track's is.
-        let envelope = envelope_of(&probe.samples);
-        self.incoming_worker.analyse(probe.samples.clone(), envelope);
+        let (envelope, bands) = envelope_with_bands(&probe.samples);
+        self.incoming_worker
+            .analyse(probe.samples.clone(), envelope, bands);
     }
 
     /// The preloaded track's grid, read in its own time, once it is ready.
@@ -231,7 +232,11 @@ impl Automix {
                 "automix: handing collected audio (from {:.1}s) to the analyser",
                 self.collected_from
             );
-            self.worker.analyse(self.collector.snapshot(), envelope);
+            self.worker.analyse(
+                self.collector.snapshot(),
+                envelope,
+                self.collector.envelope_bands(),
+            );
             return;
         }
 
@@ -244,7 +249,7 @@ impl Automix {
             return;
         }
         self.restructured_at = reached;
-        self.worker.restructure(self.collector.envelope_rms());
+        self.worker.restructure(self.collector.envelope_rms(), self.collector.envelope_bands());
     }
 
     /// Whether the published analysis describes fewer bars than the

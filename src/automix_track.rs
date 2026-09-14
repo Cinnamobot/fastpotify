@@ -29,6 +29,46 @@ pub const ENERGY_HOP_SECONDS: f64 = 0.05;
 /// grow the buffer without bound.
 const ENERGY_MAX_SECONDS: f64 = 3600.0;
 
+/// Bands the structure analysis splits the signal into.
+///
+/// A chorus is not just louder than a verse: it is *differently* balanced,
+/// with more kick and more cymbals while the midrange makes room for the
+/// vocal. Total energy cannot tell the two apart, which is why an earlier
+/// attempt at finding choruses from a single envelope kept returning the
+/// verse-and-chorus pair as one repeating unit. Three bands are enough to
+/// see the difference and cheap enough to run on the audio thread.
+pub const NUM_BANDS: usize = 3;
+
+/// Split points between the bands, in Hz.
+pub const BAND_EDGES: [f64; NUM_BANDS - 1] = [250.0, 4000.0];
+
+/// A one-pole lowpass, used to split the signal into bands.
+///
+/// A single pole is deliberate: the point is a coarse balance between
+/// bands over seconds of audio, not a clean crossover, and a one-pole costs
+/// two multiplies per sample so it can run inside the sink's push.
+#[derive(Debug, Clone, Copy, Default)]
+struct OnePole {
+    state: f64,
+    coefficient: f64,
+}
+
+impl OnePole {
+    fn new(cutoff_hz: f64, sample_rate: f64) -> Self {
+        let coefficient = 1.0 - (-std::f64::consts::TAU * cutoff_hz / sample_rate).exp();
+        Self {
+            state: 0.0,
+            coefficient: coefficient.clamp(0.0, 1.0),
+        }
+    }
+
+    #[inline]
+    fn run(&mut self, input: f64) -> f64 {
+        self.state += self.coefficient * (input - self.state);
+        self.state
+    }
+}
+
 /// Frames the collector keeps before it stops appending.
 fn keep_frames(sample_rate: u32) -> usize {
     (ANALYSED_SECONDS * f64::from(sample_rate)) as usize
@@ -52,37 +92,86 @@ struct Envelope {
     hop_samples: usize,
     /// Most readings to keep.
     max_values: usize,
+    /// Per-band sums of squares for the hop in progress.
+    band_partial: [f64; NUM_BANDS],
+    /// One reading per band per completed hop, in track order. Each band's
+    /// readings are under the same index as `values`, so a hop's balance is
+    /// readable across all of them.
+    bands: [Vec<f32>; NUM_BANDS],
+    /// The filters that split the signal, one per band, run per channel
+    /// folded into a single mono path.
+    split: [OnePole; NUM_BANDS - 1],
 }
 
 impl Envelope {
     fn new(sample_rate: u32) -> Self {
         let hop_samples = (ENERGY_HOP_SECONDS * f64::from(sample_rate)) as usize
             * crate::vis::CHANNELS as usize;
+        let rate = f64::from(sample_rate);
+        let mut split = [OnePole::default(); NUM_BANDS - 1];
+        for (filter, edge) in split.iter_mut().zip(BAND_EDGES) {
+            *filter = OnePole::new(edge, rate);
+        }
+        let max_values = (ENERGY_MAX_SECONDS / ENERGY_HOP_SECONDS) as usize;
         Self {
             values: Vec::new(),
             partial: 0.0,
             partial_samples: 0,
             hop_samples: hop_samples.max(1),
-            max_values: (ENERGY_MAX_SECONDS / ENERGY_HOP_SECONDS) as usize,
+            max_values,
+            band_partial: [0.0; NUM_BANDS],
+            bands: std::array::from_fn(|_| Vec::with_capacity(max_values)),
+            split,
         }
     }
 
     /// Folds interleaved samples into the envelope. Allocation-free, so the
     /// sink's thread can call it for every packet.
     fn push(&mut self, interleaved: &[f64]) {
+        let channels = crate::vis::CHANNELS as usize;
         let mut rest = interleaved;
         while !rest.is_empty() && self.values.len() < self.max_values {
             let take = (self.hop_samples - self.partial_samples).min(rest.len());
             for sample in &rest[..take] {
                 self.partial += sample * sample;
             }
+            // The bands are split from the same samples, folded to mono so
+            // the filters carry one state each rather than one per channel.
+            let frames = take / channels;
+            for frame in 0..frames {
+                let base = frame * channels;
+                let mut mono = 0.0;
+                for channel in 0..channels {
+                    mono += rest[base + channel];
+                }
+                mono /= channels as f64;
+                // Band 0 is everything below the first edge, and so on: each
+                // filter's output is removed from what the next one sees.
+                let mut remaining = mono;
+                for (index, filter) in self.split.iter_mut().enumerate() {
+                    let below = filter.run(remaining);
+                    self.band_partial[index] += below * below;
+                    remaining -= below;
+                }
+                self.band_partial[NUM_BANDS - 1] += remaining * remaining;
+            }
             self.partial_samples += take;
             rest = &rest[take..];
             if self.partial_samples == self.hop_samples {
                 let mean = self.partial / self.hop_samples as f64;
                 self.values.push(mean.sqrt() as f32);
+                // Each band's figure is scaled to the whole hop, mono, so
+                // the bands compare with one another rather than with the
+                // stereo total.
+                let frames = self.hop_samples / channels;
+                let scale = 1.0 / frames.max(1) as f64;
+                for band in 0..NUM_BANDS {
+                    let energy = self.band_partial[band] * scale;
+                    self.bands[band].push(energy.sqrt() as f32);
+                }
                 self.partial = 0.0;
                 self.partial_samples = 0;
+                self.band_partial = [0.0; NUM_BANDS];
             }
         }
     }
@@ -92,10 +181,27 @@ impl Envelope {
         self.values.iter().map(|value| f64::from(*value)).collect()
     }
 
+    /// Per-band readings, each the same length as [`Self::rms`].
+    fn band_rms(&self) -> [Vec<f64>; NUM_BANDS] {
+        std::array::from_fn(|band| {
+            self.bands[band]
+                .iter()
+                .map(|value| f64::from(*value))
+                .collect()
+        })
+    }
+
     fn clear(&mut self) {
         self.values.clear();
         self.partial = 0.0;
         self.partial_samples = 0;
+        self.band_partial = [0.0; NUM_BANDS];
+        for band in &mut self.bands {
+            band.clear();
+        }
+        for filter in &mut self.split {
+            *filter = OnePole::default();
+        }
     }
 }
 
@@ -118,6 +224,20 @@ pub fn envelope_of(interleaved: &[f32]) -> Vec<f64> {
             (energy / span.len() as f64).sqrt()
         })
         .collect()
+}
+
+/// The total envelope together with its per-band readings.
+///
+/// The probe's audio arrives whole, so it goes through an [`Envelope`] the
+/// same way the playing track does; that keeps one implementation of the
+/// band split rather than two that could drift apart.
+pub fn envelope_with_bands(interleaved: &[f32]) -> (Vec<f64>, [Vec<f64>; NUM_BANDS]) {
+    let sample_rate = crate::vis::SAMPLE_RATE;
+    let mut envelope = Envelope::new(sample_rate);
+    // The envelope works in interleaved f64, as the sink hands it over.
+    let widened: Vec<f64> = interleaved.iter().map(|sample| f64::from(*sample)).collect();
+    envelope.push(&widened);
+    (envelope.rms(), envelope.band_rms())
 }
 
 /// Accumulates the playing track's samples for analysis.
@@ -169,6 +289,15 @@ impl Collector {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .rms()
+    }
+
+    /// Per-band readings over the whole track so far, each the same length
+    /// as [`Self::envelope_rms`].
+    pub fn envelope_bands(&self) -> [Vec<f64>; NUM_BANDS] {
+        self.envelope
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .band_rms()
     }
 
     /// How many energy readings have been taken. Cheap enough to call on
@@ -234,12 +363,19 @@ pub struct Worker {
 /// Work handed to the analysis thread.
 enum Job {
     /// Full analysis of a track's opening: the beat grid comes from these
-    /// samples, and the structure from the envelope covering them.
-    Analyse { samples: Vec<f32>, envelope: Vec<f64> },
-    /// Re-read the structure from a longer envelope, keeping the grid that
-    /// was already tracked. Much cheaper than another beat-tracking pass,
-    /// which is what makes it affordable to do as a track plays.
-    Restructure(Vec<f64>),
+    /// samples, and the structure from the envelope and bands covering them.
+    Analyse {
+        samples: Vec<f32>,
+        envelope: Vec<f64>,
+        bands: [Vec<f64>; NUM_BANDS],
+    },
+    /// Re-read the structure from longer readings, keeping the grid that was
+    /// already tracked. Much cheaper than another beat-tracking pass, which
+    /// is what makes it affordable to do as a track plays.
+    Restructure {
+        envelope: Vec<f64>,
+        bands: [Vec<f64>; NUM_BANDS],
+    },
 }
 
 impl std::fmt::Debug for Worker {
@@ -262,24 +398,29 @@ impl Worker {
                 while let Ok(mut job) = rx.recv() {
                     while let Ok(newer) = rx.try_recv() {
                         job = match (job, newer) {
-                            (Job::Restructure(_), Job::Restructure(newer)) => {
-                                Job::Restructure(newer)
-                            }
+                            (Job::Restructure { .. }, newer @ Job::Restructure { .. }) => newer,
                             (_, newer @ Job::Analyse { .. }) => newer,
                             (job, _) => job,
                         };
                     }
                     let analysed = match job {
-                        Job::Analyse { samples, envelope } => {
-                            Analysis::of_with_envelope(&samples, sample_rate, &envelope)
-                        }
-                        Job::Restructure(envelope) => {
+                        Job::Analyse {
+                            samples,
+                            envelope,
+                            bands,
+                        } => Analysis::of_with_envelope(&samples, sample_rate, &envelope)
+                            .map(|mut analysis| {
+                                analysis.refresh_bands(&bands);
+                                analysis
+                            }),
+                        Job::Restructure { envelope, bands } => {
                             let mut current: Option<Analysis> = published
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
                                 .clone();
                             current.as_mut().map(|analysis| {
                                 analysis.refresh_structure(&envelope);
+                                analysis.refresh_bands(&bands);
                                 analysis.clone()
                             })
                         }
@@ -299,15 +440,19 @@ impl Worker {
         }
     }
 
-    /// Queues a track's opening for full analysis. Cheap: it moves a buffer.
-    pub fn analyse(&self, samples: Vec<f32>, envelope: Vec<f64>) {
-        self.send(Job::Analyse { samples, envelope });
+    /// Queues a track's opening for full analysis. Cheap: it moves buffers.
+    pub fn analyse(&self, samples: Vec<f32>, envelope: Vec<f64>, bands: [Vec<f64>; NUM_BANDS]) {
+        self.send(Job::Analyse {
+            samples,
+            envelope,
+            bands,
+        });
     }
 
-    /// Queues a fresh envelope so the structure is re-read against the
-    /// longer one, without re-tracking the beat.
-    pub fn restructure(&self, envelope: Vec<f64>) {
-        self.send(Job::Restructure(envelope));
+    /// Queues fresh readings so the structure is re-read against the longer
+    /// ones, without re-tracking the beat.
+    pub fn restructure(&self, envelope: Vec<f64>, bands: [Vec<f64>; NUM_BANDS]) {
+        self.send(Job::Restructure { envelope, bands });
     }
 
     fn send(&self, job: Job) {
@@ -407,7 +552,7 @@ mod tests {
         }
 
         let envelope = envelope_of(&samples);
-        worker.analyse(samples, envelope);
+        worker.analyse(samples, envelope, Default::default());
         // The worker is a thread; give it a bounded moment to publish.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut published = None;
@@ -432,6 +577,7 @@ mod tests {
         worker.analyse(
             vec![0.0f32; 44_100 * 10 * crate::vis::CHANNELS as usize],
             Vec::new(),
+            Default::default(),
         );
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(worker.latest().is_none());
