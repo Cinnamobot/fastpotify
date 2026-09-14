@@ -415,17 +415,10 @@ pub fn plan_exit_matched(
         Some(to) => {
             let ratio = fold_octave(to.bpm / from.bpm);
             if (ratio - 1.0).abs() > MAX_TEMPO_DIFF {
-                // Said out loud because the consequence is that no transition
-                // is planned at all, and the boundary keeps the player's own
-                // crossfade: without this the log shows nothing but a
-                // crossfade that was never armed.
-                log::debug!(
-                    "automix: refusing {:.1} against {:.1} BPM, {ratio:.3}x is past the \
-                     {:.0}% stretch limit",
-                    from.bpm,
-                    to.bpm,
-                    MAX_TEMPO_DIFF * 100.0
-                );
+                // Refused rather than smeared. The caller sees `None` and the
+                // boundary keeps the player's own crossfade. Not logged here:
+                // this runs on every position update, and the caller reports
+                // the outcome once it has decided.
                 return None;
             }
             ratio

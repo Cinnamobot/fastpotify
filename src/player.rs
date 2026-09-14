@@ -284,6 +284,9 @@ pub struct Engine {
     interrupted: Arc<Mutex<Option<Interrupted>>>,
     shutting_down: Arc<std::sync::atomic::AtomicBool>,
     audio: Arc<AudioControl>,
+    /// How long a track change overlaps. Zero means no crossfade, which is
+    /// what decides whether a skip may be played as a mix or has to cut.
+    crossfade: Duration,
 }
 
 impl Engine {
@@ -414,6 +417,7 @@ impl Engine {
             interrupted,
             shutting_down,
             audio,
+            crossfade: config.crossfade,
         })
     }
 
@@ -525,7 +529,12 @@ impl Engine {
             &self.state.lock().unwrap_or_else(|p| p.into_inner()),
             &command,
         );
-        if interrupts_audio {
+        // A skip that will be crossfaded must not be interrupted: the
+        // interrupt fades the queue out and rebuilds the output, which
+        // discards the mix that is the whole point of the crossfade and is
+        // heard as the track being cut. The crossfade itself covers the
+        // handover, so the interrupt is only for the case with no overlap.
+        if interrupts_audio && !self.crossfade_covers_skip(&command) {
             self.audio.interrupt();
         }
         let result = self.send_command(command);
@@ -534,6 +543,13 @@ impl Engine {
         }
         result
     }
+
+    /// Whether a skip will be played as a crossfade, in which case the audio
+    /// path must be left alone.
+    fn crossfade_covers_skip(&self, command: &PlayerCommand) -> bool {
+        skip_is_mixed(command, self.crossfade)
+    }
+
 
     fn send_command(&self, command: PlayerCommand) -> Result<()> {
         let spirc = &self.spirc;
@@ -608,6 +624,18 @@ fn command_interrupts_audio(state: &LocalState, command: &PlayerCommand) -> bool
             command,
             PlayerCommand::Next | PlayerCommand::Previous | PlayerCommand::Load(_)
         )
+}
+
+/// Whether a track change is played as an overlap rather than a cut.
+///
+/// A skipping command is mixed when a crossfade is configured, because the
+/// overlap is what covers the handover. A `Load` names its own track and is
+/// often a fresh start rather than a mix, so it always cuts.
+fn skip_is_mixed(command: &PlayerCommand, crossfade: Duration) -> bool {
+    matches!(
+        command,
+        PlayerCommand::Next | PlayerCommand::Previous
+    ) && !crossfade.is_zero()
 }
 
 /// Builds the audio sink and chooses where volume is applied.
@@ -1097,6 +1125,38 @@ fn decode_folder_name(encoded: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The bug this covers: a skip always interrupted the audio path, which
+    /// faded the queue out and rebuilt the output. A crossfade is a mix of
+    /// the two tracks, so interrupting it threw the mix away and the skip was
+    /// heard as a cut. The interrupt is only correct when nothing overlaps.
+    #[test]
+    fn a_crossfaded_skip_is_not_interrupted() {
+        use super::{PlayerCommand, skip_is_mixed};
+        use std::time::Duration;
+
+        assert!(skip_is_mixed(&PlayerCommand::Next, Duration::from_secs(5)));
+        assert!(skip_is_mixed(
+            &PlayerCommand::Previous,
+            Duration::from_secs(5)
+        ));
+        // With no overlap configured the skip is a cut, so the interrupt is
+        // what keeps the old track from playing on over the new one.
+        assert!(!skip_is_mixed(&PlayerCommand::Next, Duration::ZERO));
+    }
+
+    /// A load names its own track and is often a fresh start rather than a
+    /// mix, so it keeps its interrupt even when a crossfade is configured.
+    #[test]
+    fn a_load_is_not_treated_as_a_mix() {
+        use super::{LoadSpec, PlayerCommand, skip_is_mixed};
+        use std::time::Duration;
+
+        assert!(!skip_is_mixed(
+            &PlayerCommand::Load(LoadSpec::default()),
+            Duration::from_secs(5)
+        ));
+    }
+
     #[test]
     fn playback_metadata_preserves_each_artist_id_and_name() {
         use librespot_metadata::artist::{ArtistWithRole, ArtistsWithRole};
