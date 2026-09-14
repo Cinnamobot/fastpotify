@@ -45,9 +45,10 @@ impl Collector {
         })
     }
 
-    /// Appends interleaved frames. Called from the sink's thread, so it only
-    /// copies and stops once the buffer is full.
-    pub fn push(&self, interleaved: &[f32]) {
+    /// Appends interleaved frames, narrowing `f64` to `f32` on the way in.
+    /// Called from the sink's thread for every decoded packet, so it takes
+    /// the samples directly rather than through a copy.
+    pub fn push(&self, interleaved: &[f64]) {
         let mut samples = self
             .samples
             .lock()
@@ -57,7 +58,15 @@ impl Collector {
         }
         let room = self.limit - samples.len();
         let take = room.min(interleaved.len());
-        samples.extend_from_slice(&interleaved[..take]);
+        samples.extend(interleaved[..take].iter().map(|sample| *sample as f32));
+    }
+
+    /// Whether nothing has been collected yet.
+    pub fn is_empty(&self) -> bool {
+        self.samples
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_empty()
     }
 
     /// Drops what was collected, for the next track.
@@ -171,7 +180,7 @@ mod tests {
     #[test]
     fn a_collector_stops_at_its_limit() {
         let collector = Collector::new(44_100);
-        let block = vec![0.1f32; 44_100 * crate::vis::CHANNELS as usize];
+        let block = vec![0.1f64; 44_100 * crate::vis::CHANNELS as usize];
         for _ in 0..(ANALYSED_SECONDS as usize + 5) {
             collector.push(&block);
         }
@@ -182,7 +191,7 @@ mod tests {
     #[test]
     fn clearing_a_collector_frees_it_for_the_next_track() {
         let collector = Collector::new(44_100);
-        collector.push(&vec![0.1f32; 4096]);
+        collector.push(&vec![0.1f64; 4096]);
         assert!(!collector.snapshot().is_empty());
         collector.clear();
         assert!(collector.snapshot().is_empty());
@@ -192,7 +201,7 @@ mod tests {
     fn a_collector_is_not_ready_until_half_a_minute_has_been_heard() {
         let rate = 44_100;
         let collector = Collector::new(rate);
-        let one_second = vec![0.1f32; rate as usize * crate::vis::CHANNELS as usize];
+        let one_second = vec![0.1f64; rate as usize * crate::vis::CHANNELS as usize];
         for _ in 0..20 {
             collector.push(&one_second);
         }

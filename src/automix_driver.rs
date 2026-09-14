@@ -25,6 +25,9 @@ pub struct Automix {
     worker: Worker,
     /// The grid for the track that is playing, once analysis has finished.
     playing: Option<Analysis>,
+    /// Seconds into the playing track where the collected audio began, so
+    /// the grid it produces can be read in the track's own time.
+    collected_from: f64,
 }
 
 impl std::fmt::Debug for Automix {
@@ -41,6 +44,7 @@ impl Automix {
             collector,
             worker: Worker::spawn(sample_rate),
             playing: None,
+            collected_from: 0.0,
         })
     }
 
@@ -51,18 +55,42 @@ impl Automix {
         self.playing = None;
     }
 
+    /// Called after a seek. The track is unchanged, so a finished grid still
+    /// describes it, but the collected audio now has a jump in it and must
+    /// not be tracked as if it were continuous.
+    pub fn seeked(&mut self) {
+        self.collector.clear();
+        self.collected_from = 0.0;
+    }
+
     /// Called as the track plays, to keep the grid current.
+    ///
+    /// `position` is where the play head is now; the first call after a
+    /// track change or a seek fixes where the collected audio began, which
+    /// is what the finished grid is anchored to.
     ///
     /// Analysis runs on the worker thread, so this only queues a snapshot
     /// once enough audio has been collected to be worth it.
-    pub fn tick(&mut self, sample_rate: u32) {
+    pub fn tick(&mut self, sample_rate: u32, position: Duration) {
+        if self.collector.is_empty() {
+            self.collected_from = position.as_secs_f64();
+        }
         if self.playing.is_some() || !self.collector.is_ready(sample_rate) {
             return;
         }
         if let Some(analysis) = self.worker.latest() {
+            log::debug!(
+                "automix: beat grid ready at {:.1} BPM, anchored at {:.1}s",
+                analysis.bpm,
+                self.collected_from
+            );
             self.playing = Some(analysis);
             return;
         }
+        log::debug!(
+            "automix: handing collected audio (from {:.1}s) to the analyser",
+            self.collected_from
+        );
         self.worker.analyse(self.collector.snapshot());
     }
 
@@ -72,7 +100,8 @@ impl Automix {
     /// `out_duration` is the whole track's length.
     pub fn plan(&self, elapsed: Duration, out_duration: Duration) -> Option<automix::Transition> {
         let playing = self.playing.as_ref()?;
-        automix::plan_exit(playing, out_duration)
+        let anchored = playing.clone().anchored_at(self.collected_from);
+        automix::plan_exit(&anchored, out_duration)
             .filter(|transition| transition.fade_out_at >= elapsed.as_secs_f64())
     }
 }
@@ -107,7 +136,7 @@ mod tests {
     fn settle(automix: &mut Automix, rate: u32) -> bool {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while std::time::Instant::now() < deadline {
-            automix.tick(rate);
+            automix.tick(rate, Duration::from_secs(0));
             if automix.playing.is_some() {
                 return true;
             }
@@ -133,7 +162,8 @@ mod tests {
     fn a_planned_transition_lands_on_the_playing_track() {
         let collector = Collector::new(44_100);
         let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
-        collector.push(&clicks(35.0, 44_100));
+        let audio: Vec<f64> = clicks(35.0, 44_100).iter().map(|s| f64::from(*s)).collect();
+        collector.push(&audio);
         assert!(settle(&mut automix, 44_100), "the grid is published");
 
         let planned = automix
@@ -148,7 +178,8 @@ mod tests {
     fn a_transition_already_passed_is_not_armed() {
         let collector = Collector::new(44_100);
         let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
-        collector.push(&clicks(35.0, 44_100));
+        let audio: Vec<f64> = clicks(35.0, 44_100).iter().map(|s| f64::from(*s)).collect();
+        collector.push(&audio);
         assert!(settle(&mut automix, 44_100));
 
         // Pretend the track is far shorter than the plan's exit point.

@@ -432,6 +432,23 @@ mod tests {
     }
 
     #[test]
+    fn older_settings_default_to_no_crossfade() {
+        let settings: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(settings.crossfade_seconds, 0);
+    }
+
+    #[test]
+    fn a_chosen_crossfade_round_trips() {
+        let settings = Settings {
+            crossfade_seconds: 7,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.crossfade_seconds, 7);
+    }
+
+    #[test]
     fn compact_tracklist_round_trips() {
         let settings = Settings {
             tracklist_compact: true,

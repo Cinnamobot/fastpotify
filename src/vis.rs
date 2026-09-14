@@ -233,9 +233,7 @@ impl Sink for Tapped {
                 // The playing track's own audio, before volume: the beat
                 // grid must not move when the listener turns the knob.
                 if let Some(collector) = &self.analysis {
-                    let gathered: Vec<f32> =
-                        samples.iter().map(|sample| *sample as f32).collect();
-                    collector.push(&gathered);
+                    collector.push(&samples);
                 }
                 let attenuation = self.volume.attenuation_factor();
                 if self.applies_volume {

@@ -51,6 +51,9 @@ pub struct Analysis {
     pub bpm: f64,
     /// Seconds from the start of the track to its first beat.
     pub first_beat: f64,
+    /// Seconds into the track where the collected audio began. The grid's
+    /// positions are relative to that point, not to the track's start.
+    pub offset_in_track: f64,
 }
 
 impl Analysis {
@@ -77,12 +80,29 @@ impl Analysis {
         Some(Self {
             first_beat: grid.beats[0] / f64::from(grid.sample_rate),
             bpm: grid.bpm,
+            offset_in_track: 0.0,
             grid,
         })
     }
 
-    /// Downbeat positions in seconds. The grid marks these by index; when it
-    /// marks none, every fourth beat stands in.
+    /// Tells the analysis where in the track its audio was taken from, so
+    /// its grid can be read in the track's own time.
+    ///
+    /// Automix only ever hears part of a track, and a listener may start
+    /// anywhere in one, so the grid is anchored by the caller's offset
+    /// rather than assumed to begin at zero.
+    pub fn anchored_at(mut self, seconds: f64) -> Self {
+        self.offset_in_track = seconds.max(0.0);
+        self
+    }
+
+    /// The bar length in seconds.
+    fn bar_seconds(&self) -> f64 {
+        BEATS_PER_BAR * 60.0 / self.bpm
+    }
+
+    /// Downbeat positions in track time. The grid marks these by index;
+    /// when it marks none, every fourth beat stands in.
     fn downbeats(&self) -> Vec<f64> {
         let rate = f64::from(self.grid.sample_rate);
         let marked: Vec<f64> = self
@@ -90,7 +110,7 @@ impl Analysis {
             .downbeats
             .iter()
             .filter_map(|index| self.grid.beats.get(*index))
-            .map(|position| position / rate)
+            .map(|position| self.offset_in_track + position / rate)
             .collect();
         if marked.len() >= 2 {
             return marked;
@@ -99,30 +119,44 @@ impl Analysis {
             .beats
             .iter()
             .step_by(BEATS_PER_BAR as usize)
-            .map(|position| position / rate)
+            .map(|position| self.offset_in_track + position / rate)
             .collect()
     }
 
-    /// The last downbeat at or before `seconds`, falling back to the first
-    /// downbeat when the track has not reached one yet.
-    fn downbeat_at_or_before(&self, seconds: f64) -> Option<f64> {
-        let beats = self.downbeats();
-        beats
-            .iter()
-            .rev()
-            .find(|start| **start <= seconds)
-            .copied()
-            .or_else(|| beats.first().copied())
+    /// The first downbeat of the grid, in track time: the phase the bar
+    /// repeats on.
+    fn downbeat_phase(&self) -> Option<f64> {
+        self.downbeats().first().copied()
     }
 
-    /// The first downbeat at or after `seconds`.
+    /// The last downbeat at or before `seconds`.
+    ///
+    /// Extrapolates from the grid's first downbeat, because the audio that
+    /// reaches the sink covers a window of the track rather than the whole
+    /// of it, and the exit it must find usually lies outside that window.
+    fn downbeat_at_or_before(&self, seconds: f64) -> Option<f64> {
+        let phase = self.downbeat_phase()?;
+        let bar = self.bar_seconds();
+        if !(bar.is_finite() && bar > 0.0) || seconds < phase {
+            return self
+                .downbeats()
+                .into_iter()
+                .next()
+                .filter(|_| seconds >= phase);
+        }
+        let bars = ((seconds - phase) / bar).floor();
+        Some(phase + bars * bar)
+    }
+
+    /// The first downbeat at or after `seconds`, extrapolating likewise.
     fn downbeat_at_or_after(&self, seconds: f64) -> Option<f64> {
-        let beats = self.downbeats();
-        beats
-            .iter()
-            .find(|start| **start >= seconds)
-            .copied()
-            .or_else(|| beats.last().copied())
+        let phase = self.downbeat_phase()?;
+        let bar = self.bar_seconds();
+        if !(bar.is_finite() && bar > 0.0) || seconds <= phase {
+            return Some(phase);
+        }
+        let bars = ((seconds - phase) / bar).ceil();
+        Some(phase + bars * bar)
     }
 }
 
@@ -350,8 +384,16 @@ mod tests {
         assert_eq!(planned.tempo_ratio, 1.0);
         assert_eq!(planned.fade_in_at, 0.0);
         assert!(planned.duration >= MIN_TRANSITION);
-        // The exit lands on a downbeat inside what is left of the track.
-        assert!(a.downbeats().iter().any(|beat| (beat - planned.fade_out_at).abs() < 1e-9));
+        // The exit lands on the bar lattice the grid defines, which may be
+        // extrapolated past the audio that was actually analysed.
+        let phase = a.downbeat_phase().expect("a grid has a phase");
+        let bar = a.bar_seconds();
+        let bars = (planned.fade_out_at - phase) / bar;
+        assert!(
+            (bars - bars.round()).abs() < 1e-6,
+            "exit {} is not a whole bar from the phase {phase} (spacing {bar})",
+            planned.fade_out_at
+        );
         assert!(planned.fade_out_at + planned.duration.as_secs_f64() <= 40.0);
     }
 
@@ -359,6 +401,27 @@ mod tests {
     fn an_unmatched_track_too_short_to_fade_is_refused() {
         let a = Analysis::of(&click_track(128.0, 40.0, 44_100), 44_100).unwrap();
         assert!(plan_exit(&a, Duration::from_secs(2)).is_none());
+    }
+
+    /// The bug this covers: automix hears a window of a track, not the whole
+    /// of it, so a grid taken from 100 seconds in has its beats near zero.
+    /// Read without the offset, every exit it computes lands in the wrong
+    /// place and is discarded as already past.
+    #[test]
+    fn a_grid_anchored_mid_track_still_plans_an_exit_near_the_end() {
+        let a = Analysis::of(&click_track(128.0, 60.0, 44_100), 44_100)
+            .unwrap()
+            .anchored_at(100.0);
+        let planned = plan_exit(&a, Duration::from_secs(200)).expect("a long track has room");
+        assert!(
+            planned.fade_out_at > 180.0,
+            "exit at {} should sit near the end of a 200s track",
+            planned.fade_out_at
+        );
+        assert!(planned.fade_out_at + planned.duration.as_secs_f64() <= 200.0);
+        // The phase carries the offset, so the bar lattice lines up with the
+        // track rather than with the moment collection happened to start.
+        assert!(a.downbeat_phase().unwrap() >= 100.0);
     }
 
     #[test]

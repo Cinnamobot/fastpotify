@@ -726,7 +726,12 @@ async fn run_events(
                     automix.track_changed();
                 }
             }
-            PlayerEvent::Seeked { .. } => audio.track_changed(),
+            PlayerEvent::Seeked { .. } => {
+                audio.track_changed();
+                if let Some(automix) = &mut automix {
+                    automix.seeked();
+                }
+            }
             PlayerEvent::Stopped { .. } => audio.stopped(),
             _ => {}
         }
@@ -778,7 +783,7 @@ fn drive_automix(
             track.duration_ms,
         )
     };
-    automix.tick(crate::vis::SAMPLE_RATE);
+    automix.tick(crate::vis::SAMPLE_RATE, elapsed);
     let Some(planned) = automix.plan(elapsed, Duration::from_millis(u64::from(duration_ms))) else {
         return;
     };
@@ -789,6 +794,12 @@ fn drive_automix(
     if remaining > planned.duration + Duration::from_secs(30) {
         return;
     }
+    log::debug!(
+        "automix: arming a {:.2}s transition, exiting at {:.2}s (remaining {:.1}s)",
+        planned.duration.as_secs_f64(),
+        planned.fade_out_at,
+        remaining.as_secs_f64()
+    );
     let fade_out_before_end =
         Duration::from_millis(u64::from(duration_ms)).saturating_sub(Duration::from_secs_f64(
             planned.fade_out_at,
