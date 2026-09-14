@@ -814,6 +814,7 @@ fn drive_automix(
         duration: planned.duration,
         fade_out_before_end,
         fade_in_at: Duration::from_secs_f64(planned.fade_in_at),
+        tempo_rate: planned.tempo_ratio,
     }));
 }
 

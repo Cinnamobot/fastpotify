@@ -282,8 +282,11 @@ pub struct Transition {
     pub fade_in_at: f64,
     /// How long the two overlap.
     pub duration: Duration,
-    /// Tempo multiplier for the incoming track: the outgoing tempo over the
-    /// incoming one, folded to the nearest octave.
+    /// The rate the outgoing tail is played at, with its pitch held: the
+    /// incoming tempo over the outgoing one, folded to the nearest octave.
+    /// The outgoing track is the one stretched, because its beats are the
+    /// ones that have to move onto the incoming track's grid before it fades
+    /// away.
     pub tempo_ratio: f64,
 }
 
@@ -294,12 +297,11 @@ pub fn bars_of(duration: Duration, bpm: f64) -> f64 {
 
 /// Plan a transition when only the outgoing track has been analysed.
 ///
-/// The incoming track is only preloaded, so its audio never reaches the
-/// sink's collector and its grid is unknown. That costs two things: it
-/// starts at its own beginning rather than on a chosen downbeat, and it is
-/// not stretched. What it still buys is the part listeners notice — the
-/// outgoing track leaves on a downbeat instead of wherever its last sample
-/// falls, and the overlap is a whole number of bars.
+/// The incoming track's grid may be unknown: it does not reach the sink, and
+/// a probe of it may not have produced one. Without it the pair is not
+/// stretched and the incoming track starts at its own beginning, but the
+/// outgoing track still leaves on a downbeat instead of wherever its last
+/// sample falls, and the overlap is still a whole number of bars.
 pub fn plan_exit(from: &Analysis, out_duration: Duration) -> Option<Transition> {
     plan_exit_for(from, out_duration)
 }
@@ -312,10 +314,52 @@ pub fn plan_exit(from: &Analysis, out_duration: Duration) -> Option<Transition> 
 /// taken from there when `bar_loudness` has a span that fits the overlap
 /// and still leaves the outgoing track playing afterwards.
 pub fn plan_exit_for(from: &Analysis, out_duration: Duration) -> Option<Transition> {
+    plan_exit_matched(from, None, out_duration)
+}
+
+/// Plan an exit knowing the incoming track's grid as well.
+///
+/// With the other grid in hand the pair can be tempo-matched: the outgoing
+/// tail is played at the ratio between the two, and the transition also
+/// starts the incoming track on a downbeat of its own. `incoming` must
+/// already be anchored in its track's time.
+///
+/// Returns `None` when the two tempos are too far apart to stretch across,
+/// so an unmatched pair falls back to a plain exit rather than a smear.
+pub fn plan_exit_matched(
+    from: &Analysis,
+    incoming: Option<&Analysis>,
+    out_duration: Duration,
+) -> Option<Transition> {
+    // Match the tempos. A factor near 0.5 or 2.0 is the same groove at half
+    // or double time, so fold those in before judging the gap.
+    let tempo_ratio = match incoming {
+        Some(to) => {
+            let ratio = fold_octave(to.bpm / from.bpm);
+            if (ratio - 1.0).abs() > MAX_TEMPO_DIFF {
+                return None;
+            }
+            ratio
+        }
+        None => 1.0,
+    };
     let beat_seconds = 60.0 / from.bpm;
     for bars in BAR_CHOICES {
+        // `seconds` is how much of the outgoing track the overlap eats, and
+        // `overlap` is how long that takes to play. The two differ once the
+        // tail is stretched: at `tempo_ratio`, a wall-clock second of output
+        // consumes `tempo_ratio` seconds of the outgoing material.
         let seconds = f64::from(bars) * BEATS_PER_BAR * beat_seconds;
-        let duration = Duration::from_secs_f64(seconds);
+        let overlap = match incoming {
+            // Matched, the overlap is the same whole number of bars of the
+            // incoming track. Because the ratio is the two tempos' quotient
+            // and the outgoing tail is the one stretched, that leaves the
+            // outgoing track traversing exactly `seconds` of its own bars —
+            // both tracks cross the overlap having played the same count.
+            Some(to) => f64::from(bars) * BEATS_PER_BAR * 60.0 / to.bpm,
+            None => seconds,
+        };
+        let duration = Duration::from_secs_f64(overlap);
         if duration > MAX_TRANSITION || duration < MIN_TRANSITION {
             continue;
         }
@@ -340,9 +384,14 @@ pub fn plan_exit_for(from: &Analysis, out_duration: Duration) -> Option<Transiti
         };
         return Some(Transition {
             fade_out_at,
-            fade_in_at: 0.0,
+            // The incoming track starts on one of its own downbeats, so both
+            // tracks land their bar together instead of one sliding under
+            // the other.
+            fade_in_at: incoming
+                .and_then(|to| to.downbeat_at_or_after(0.0))
+                .unwrap_or(0.0),
             duration,
-            tempo_ratio: 1.0,
+            tempo_ratio,
         });
     }
     None
@@ -354,45 +403,7 @@ pub fn plan_exit_for(from: &Analysis, out_duration: Duration) -> Option<Transiti
 /// tempo gap too wide to stretch across, or a track too short to fade. The
 /// caller then uses a plain crossfade.
 pub fn plan(from: &Analysis, to: &Analysis, out_duration: Duration) -> Option<Transition> {
-    // Match the tempos. A factor near 0.5 or 2.0 is the same groove at half
-    // or double time, so fold those in before judging the gap.
-    let ratio = fold_octave(from.bpm / to.bpm);
-    if (ratio - 1.0).abs() > MAX_TEMPO_DIFF {
-        return None;
-    }
-
-    let beat_seconds = 60.0 / from.bpm;
-    for bars in BAR_CHOICES {
-        let seconds = f64::from(bars) * BEATS_PER_BAR * beat_seconds;
-        let duration = Duration::from_secs_f64(seconds);
-        if duration > MAX_TRANSITION || duration < MIN_TRANSITION {
-            continue;
-        }
-
-        // Leave a bar of slack so a slow decode cannot cut the fade short.
-        let slack = beat_seconds * BEATS_PER_BAR;
-        let latest_start = out_duration.as_secs_f64() - seconds - slack;
-        if latest_start <= from.first_beat {
-            continue;
-        }
-
-        let Some(fade_out_at) = from.downbeat_at_or_before(latest_start) else {
-            continue;
-        };
-        // Start on the incoming track's first downbeat: before that the
-        // tracker has no history, so its phase is the least reliable.
-        let Some(fade_in_at) = to.downbeat_at_or_after(to.first_beat) else {
-            continue;
-        };
-
-        return Some(Transition {
-            fade_out_at,
-            fade_in_at,
-            duration,
-            tempo_ratio: ratio,
-        });
-    }
-    None
+    plan_exit_matched(from, Some(to), out_duration)
 }
 
 /// Fold a tempo ratio into the octave nearest 1.0.
@@ -569,6 +580,62 @@ mod tests {
         assert!((planned.tempo_ratio - 1.0).abs() <= MAX_TEMPO_DIFF);
         // The fade has to finish before the outgoing track does.
         assert!(planned.fade_out_at + planned.duration.as_secs_f64() <= 40.0);
+    }
+
+    /// The point of matching the tempo: across the overlap both tracks must
+    /// play the same number of bars, so every beat of one lands on a beat of
+    /// the other. If the overlap were measured in the outgoing track's bars
+    /// the stretched tail would cross a different count than the incoming
+    /// track, and the two would drift apart by the end of the fade.
+    #[test]
+    fn a_matched_pair_crosses_the_same_bars_on_both_decks() {
+        let a = Analysis::of(&click_track(128.0, 40.0, 44_100), 44_100).unwrap();
+        let b = Analysis::of(&click_track(130.0, 40.0, 44_100), 44_100).unwrap();
+        let planned = plan(&a, &b, Duration::from_secs(40)).expect("matched tempos mix");
+
+        let overlap = planned.duration.as_secs_f64();
+        // The incoming track plays `overlap` seconds at its own tempo.
+        let incoming_bars = overlap * b.bpm / 60.0 / BEATS_PER_BAR;
+        // The outgoing tail is played at the ratio, so it crosses this much
+        // of its own material.
+        let outgoing_material = overlap * planned.tempo_ratio;
+        let outgoing_bars = outgoing_material * a.bpm / 60.0 / BEATS_PER_BAR;
+
+        assert!(
+            (incoming_bars - incoming_bars.round()).abs() < 1e-6,
+            "the overlap is not a whole number of incoming bars: {incoming_bars}"
+        );
+        assert!(
+            (incoming_bars - outgoing_bars).abs() < 1e-6,
+            "the decks cross different bar counts: incoming {incoming_bars}, \
+             outgoing {outgoing_bars}"
+        );
+        // The ratio comes from the grids the tracker measured, which are near
+        // but not exactly the tempos the clicks were generated at.
+        let expected = fold_octave(b.bpm / a.bpm);
+        assert!(
+            (planned.tempo_ratio - expected).abs() < 1e-9,
+            "the ratio must be the two measured tempos' quotient"
+        );
+        assert!(planned.tempo_ratio > 1.0, "the faster incoming track speeds the tail up");
+    }
+
+    /// The outgoing tail must not run out before the fade does: the material
+    /// the overlap needs has to fit between the exit and the track's end.
+    #[test]
+    fn the_matched_overlap_leaves_the_outgoing_track_playing() {
+        let a = Analysis::of(&click_track(128.0, 40.0, 44_100), 44_100).unwrap();
+        let b = Analysis::of(&click_track(136.0, 40.0, 44_100), 44_100).unwrap();
+        let planned = plan(&a, &b, Duration::from_secs(40)).expect("matched tempos mix");
+        // A faster incoming track makes the tail play faster than its own
+        // tempo, which is the case that can run off the end of the material:
+        // it eats more of the track than the overlap lasts.
+        assert!(planned.tempo_ratio > 1.0, "the tail is sped up");
+        let consumed = planned.fade_out_at + planned.duration.as_secs_f64() * planned.tempo_ratio;
+        assert!(
+            consumed <= 40.0,
+            "the tail needs {consumed:.2}s of a 40s track"
+        );
     }
 
     #[test]

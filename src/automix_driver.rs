@@ -5,10 +5,11 @@
 //! next track, the collected grid is turned into a transition plan and
 //! handed to librespot, which fires the overlap on the plan's timing.
 //!
-//! Only the outgoing track reaches the sink: librespot preloads the next
-//! track's decoder without writing it anywhere, so its grid is unknown and
-//! the plan is made with [`plan_exit`]. That still lands the crossfade on a
-//! downbeat, which is the audible part.
+//! Only the outgoing track reaches the sink, so the incoming track's grid
+//! comes from a short probe of its decoder instead. With both grids the pair
+//! is tempo-matched and the overlap starts on the incoming track's downbeat;
+//! without the probe the plan still lands the exit on a downbeat of the
+//! outgoing track, which is the audible part.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,19 +147,12 @@ impl Automix {
         let incoming = self.incoming_analysis().cloned();
         let playing = self.playing.as_ref()?;
         let anchored = playing.clone().anchored_at(self.collected_from);
-        automix::plan_exit(&anchored, out_duration)
+        // The probe is anchored where its audio was taken from, the same way
+        // the playing grid is: without it the incoming bars are read as if
+        // the track began at the probe.
+        let incoming = incoming.map(|to| to.anchored_at(self.incoming_from));
+        automix::plan_exit_matched(&anchored, incoming.as_ref(), out_duration)
             .filter(|transition| transition.fade_out_at >= elapsed.as_secs_f64())
-            .map(|mut transition| {
-                // Starting the incoming track on its own downbeat is what
-                // stops the overlap sounding like one track fading under
-                // another: both land their bar together.
-                if let Some(incoming) = &incoming
-                    && let Some(from) = incoming.downbeat_at_or_after(0.0)
-                {
-                    transition.fade_in_at = from;
-                }
-                transition
-            })
     }
 }
 
@@ -168,9 +162,14 @@ mod tests {
 
     /// A click track at 128 BPM, interleaved.
     fn clicks(seconds: f64, rate: u32) -> Vec<f32> {
+        clicks_at(128.0, seconds, rate)
+    }
+
+    /// The same, at a chosen tempo.
+    fn clicks_at(bpm: f64, seconds: f64, rate: u32) -> Vec<f32> {
         let channels = crate::vis::CHANNELS as usize;
         let mut samples = vec![0.0f32; (seconds * f64::from(rate)) as usize * channels];
-        let beat = 60.0 / 128.0;
+        let beat = 60.0 / bpm;
         let mut t = 0.0;
         while t < seconds {
             let start = (t * f64::from(rate)) as usize * channels;
@@ -244,6 +243,46 @@ mod tests {
                 .plan(Duration::from_secs(0), Duration::from_secs(3))
                 .is_none(),
             "a track with no room must not arm a transition"
+        );
+    }
+
+    /// Without a grid for the playing track there is nothing to plan from, so
+    /// nothing is armed and the player keeps its own plain crossfade. This is
+    /// the path taken when analysis is unavailable, and it must not arm a
+    /// transition with made-up timing.
+    #[test]
+    fn no_grid_arms_nothing() {
+        let collector = Collector::new(44_100);
+        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
+        assert!(automix.playing.is_none(), "nothing analysed yet");
+        assert!(
+            automix
+                .plan(Duration::from_secs(0), Duration::from_secs(240))
+                .is_none(),
+            "an unanalysed track must not produce a plan"
+        );
+    }
+
+    /// A pair too far apart in tempo is refused rather than smeared, so the
+    /// boundary falls back to the plain crossfade even though both grids are
+    /// known.
+    #[test]
+    fn a_hopeless_pair_falls_back_to_the_plain_crossfade() {
+        let collector = Collector::new(44_100);
+        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
+        automix.playing = Some(
+            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
+        );
+        // 128 against 176 BPM is far past the stretch limit.
+        automix.incoming = Some((
+            Analysis::of(&clicks_at(176.0, 20.0, 44_100), 44_100).expect("analysable"),
+            0.0,
+        ));
+        assert!(
+            automix
+                .plan(Duration::from_secs(0), Duration::from_secs(240))
+                .is_none(),
+            "an unmixable pair must not be armed"
         );
     }
 
