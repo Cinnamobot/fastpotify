@@ -834,10 +834,16 @@ fn drive_automix(
     };
     let plan = planned.map(|planned| {
         log::debug!(
-            "automix: arming a {:.2}s transition, exiting at {:.2}s, tail at {:.4}x",
+            "automix: arming a {:.2}s transition, exiting at {:.2}s, starting the next at {:.2}s, tail at {:.4}x{}",
             planned.duration.as_secs_f64(),
             planned.fade_out_at,
-            planned.tempo_ratio
+            planned.fade_in_at,
+            planned.tempo_ratio,
+            if planned.tempo_ratio == 1.0 {
+                " (no incoming grid, so nothing is matched)"
+            } else {
+                ""
+            }
         );
         librespot_playback::player::CrossfadePlan {
             duration: planned.duration,

@@ -16,6 +16,7 @@
 use std::time::Duration;
 
 use timestretch::BeatGrid;
+use timestretch::engine::{Engine, EngineConfig, EngineProfile};
 
 /// The longest overlap the official clients allow, and the ceiling our
 /// planner keeps to.
@@ -559,6 +560,151 @@ pub struct Transition {
     pub tempo_ratio: f64,
 }
 
+/// The rate each deck plays at, `p` of the way through an overlap.
+///
+/// The two decks are locked to each other: if one is on a beat, the other has
+/// to be on a beat at the same instant, so their playback rates can never be
+/// chosen independently. Writing `r` for the ratio between the tracks, the
+/// outgoing deck at `rate` forces the incoming one to `rate / r` — a
+/// quotient of exactly `r` at every instant, which is what keeps them locked.
+///
+/// `r^p` runs from `1.0` to `r` across the overlap. That choice makes each
+/// deck natural exactly when it owns the mix: the outgoing deck starts at its
+/// own tempo, so the track the listener is already hearing never lurches
+/// when the transition opens, and by the end it has handed over and the
+/// incoming deck is back at `r / r = 1.0` — its own tempo — just as it
+/// becomes the loud one. The stretch migrates from one deck to the other
+/// while both stay locked.
+///
+/// A geometric run is the only shape that works: two straight lines would
+/// keep the quotient constant only if they were the same line, which they
+/// cannot be while one starts at 1.0 and the other ends there.
+pub fn curve_rates(ratio: f64, progress: f64) -> (f64, f64) {
+    let progress = progress.clamp(0.0, 1.0);
+    let outgoing = ratio.powf(progress);
+    (outgoing, outgoing / ratio)
+}
+
+/// How far apart the rate retargets are placed, in output frames.
+///
+/// The engine takes a rate per block and ramps to it over the block, so the
+/// curve is a staircase in practice. Placing the steps this far apart keeps
+/// the schedule shallow enough to stay under the engine's pending-retarget
+/// limit, which is the one thing a long curve can trip: the calls are made
+/// from the same loop that renders, so the steps land exactly where they are
+/// asked for.
+const CURVE_STEP_FRAMES: u64 = 1_024;
+
+/// Renders `frames` of the incoming track under the curve, ready to be mixed.
+///
+/// `source` is the incoming track's audio from where the overlap starts,
+/// interleaved at `channels`. The output is exactly `frames` frames: the
+/// overlap is a fixed length of wall clock, and the rate decides how much of
+/// the track is consumed to fill it.
+///
+/// This drives the same engine the live decks use, rendering ahead of time
+/// rather than against an audio callback. That is deliberate. The live path
+/// has to be fed from a decode loop that is also driving the sink, so a deck
+/// that wants more source than has been decoded underruns — which is exactly
+/// how a live version of this broke. Offline there is no deadline: the source
+/// is pushed until there is room, the render is pulled until the overlap is
+/// full, and the two cannot outrun each other. Pitch is held by the same
+/// keylock stage either way.
+///
+/// Returns an empty vector when the curve cannot be rendered, so the caller
+/// can fall back to a plain crossfade rather than mix a hole.
+pub fn render_curve(
+    source: &[f32],
+    ratio: f64,
+    frames: usize,
+    channels: usize,
+    sample_rate: u32,
+) -> Vec<f32> {
+    if frames == 0 || !(1..=8).contains(&channels) || !(ratio.is_finite() && ratio > 0.0) {
+        return Vec::new();
+    }
+    if source.is_empty() {
+        return Vec::new();
+    }
+    // The incoming deck starts away from its own tempo and ends on it, which
+    // is `curve_rates` at the two ends of the overlap.
+    let (_, first) = curve_rates(ratio, 0.0);
+    let Ok(handles) = Engine::build(EngineConfig {
+        sample_rate,
+        channels,
+        profile: EngineProfile::Keylock,
+        initial_tempo_rate: first,
+        max_block_frames: CURVE_STEP_FRAMES as usize,
+        ..EngineConfig::default()
+    }) else {
+        return Vec::new();
+    };
+    let (controller, mut processor, mut source_ring) =
+        (handles.controller, handles.processor, handles.source);
+    source_ring.set_track_position(0);
+    let latency = processor.pipeline_latency_frames();
+
+    // The engine delays the source by its pipeline, so it has to be fed that
+    // much beyond the last real frame for the final windows to come out.
+    // Zero source after the music, as the batch path does: it is lookahead,
+    // not audio the listener will hear past the overlap.
+    let flush_frames = latency + CURVE_STEP_FRAMES as usize;
+    let flush: Vec<f32> = vec![0.0; flush_frames * channels];
+
+    let mut feed = 0usize;
+    let mut flush_fed = 0usize;
+    let mut finished = false;
+    let mut block = vec![0.0f32; CURVE_STEP_FRAMES as usize * channels];
+    let total_needed = (frames + latency) * channels;
+    let mut collected: Vec<f32> = Vec::with_capacity(total_needed + block.len());
+
+    while collected.len() < total_needed {
+        // Where this block begins, as a fraction of the overlap. The step is
+        // scheduled before the block that will play it, so it is already in
+        // effect when that block renders.
+        let done = collected.len() / channels;
+        let (_, incoming) = curve_rates(ratio, done as f64 / frames as f64);
+        controller.set_tempo_rate_at(incoming, (done + latency) as u64);
+
+        while feed < source.len() && source_ring.free_frames() > 0 {
+            let end = (feed + 8_192 * channels).min(source.len());
+            feed += source_ring.push(&source[feed..end]) * channels;
+        }
+        if feed >= source.len() {
+            while flush_fed < flush.len() && source_ring.free_frames() > 0 {
+                flush_fed += source_ring.push(&flush[flush_fed..]) * channels;
+            }
+            if flush_fed >= flush.len() && !finished {
+                finished = source_ring.finish();
+            }
+        }
+        if finished && source_ring.occupied_frames() == 0 {
+            // The track ran out before the overlap did. Returning what was
+            // rendered lets the caller decide; a partial buffer mixed under
+            // the full fade would leave the second half of the overlap with
+            // one deck.
+            break;
+        }
+        let underruns = controller.underrun_frames();
+        processor.process(&mut block);
+        if controller.underrun_frames() > underruns {
+            // Nothing left to render: the source is spent.
+            break;
+        }
+        collected.extend_from_slice(&block);
+    }
+
+    // The pipeline's fill is not audio the listener is meant to hear, and it
+    // sits at the head of the render. Dropping it structurally is what makes
+    // the overlap line up with the outgoing deck's own count.
+    if collected.len() < latency * channels {
+        return Vec::new();
+    }
+    collected.drain(..latency * channels);
+    collected.truncate(frames * channels);
+    collected
+}
+
 /// Bars the overlap spans at the outgoing track's tempo.
 pub fn bars_of(duration: Duration, bpm: f64) -> f64 {
     duration.as_secs_f64() * bpm / 60.0 / BEATS_PER_BAR
@@ -773,6 +919,248 @@ mod tests {
         }
         samples
     }
+
+    /// How many times the audio crosses its own half level going up.
+    ///
+    /// `click_track` puts one sharp pulse per beat against silence, so a rise
+    /// through half of the peak is one beat and the count is how many the
+    /// buffer holds. Enough to tell a curve from a constant render, without
+    /// needing a tracker.
+    fn count_onsets(samples: &[f32], channels: usize) -> usize {
+        let peak = samples.iter().fold(0.0f32, |worst, sample| worst.max(sample.abs()));
+        if peak <= 0.0 {
+            return 0;
+        }
+        let half = peak / 2.0;
+        let mono: Vec<f32> = samples.chunks(channels).map(|frame| frame[0]).collect();
+        mono.windows(2)
+            .filter(|pair| pair[0] < half && pair[1] >= half)
+            .count()
+    }
+
+
+    /// The lock the whole curve exists for: whatever the two decks are doing,
+    /// their rates keep a constant quotient, or their beats would drift apart
+    /// over the bars the overlap lasts.
+    #[test]
+    fn the_curve_keeps_the_two_decks_locked_at_every_point() {
+        let ratio = 1.2652;
+        for step in 0..=1000 {
+            let (outgoing, incoming) = curve_rates(ratio, f64::from(step) / 1000.0);
+            assert!(
+                (outgoing / incoming - ratio).abs() < 1e-9,
+                "at step {step} the decks drifted to a quotient of {}",
+                outgoing / incoming
+            );
+        }
+    }
+
+    /// Each deck has to be at its own tempo at the end it owns, or the track
+    /// the listener is hearing would change speed at the moment it is loudest.
+    #[test]
+    fn the_curve_leaves_each_deck_natural_when_it_owns_the_mix() {
+        let ratio = 1.2652;
+        let (outgoing, incoming) = curve_rates(ratio, 0.0);
+        assert!(
+            (outgoing - 1.0).abs() < 1e-9,
+            "the outgoing deck must open at its own tempo, got {outgoing}"
+        );
+        assert!((incoming - 1.0 / ratio).abs() < 1e-9);
+
+        let (outgoing, incoming) = curve_rates(ratio, 1.0);
+        assert!((outgoing - ratio).abs() < 1e-9);
+        assert!(
+            (incoming - 1.0).abs() < 1e-9,
+            "the incoming deck must land on its own tempo, got {incoming}"
+        );
+    }
+
+    /// The stretch has to sit on the deck that is quietest. That is what
+    /// makes a shared curve inaudible where a one-deck stretch is not.
+    #[test]
+    fn the_curve_puts_the_stretch_on_the_deck_that_is_fading() {
+        let ratio = 1.2652;
+        // The outgoing deck only ever leaves its own tempo, and the incoming
+        // deck only ever comes towards it.
+        let mut previous = 0.0;
+        for step in 0..=100 {
+            let (outgoing, _) = curve_rates(ratio, f64::from(step) / 100.0);
+            let stretch = (outgoing - 1.0).abs();
+            assert!(
+                stretch >= previous - 1e-9,
+                "the outgoing deck came back towards its own tempo mid-fade"
+            );
+            previous = stretch;
+        }
+        let mut previous = f64::INFINITY;
+        for step in 0..=100 {
+            let (_, incoming) = curve_rates(ratio, f64::from(step) / 100.0);
+            let stretch = (incoming - 1.0).abs();
+            assert!(
+                stretch <= previous + 1e-9,
+                "the incoming deck drifted further off as it grew louder"
+            );
+            previous = stretch;
+        }
+    }
+
+    /// The rendered overlap has to be exactly as long as the transition: it
+    /// is mixed under a fixed-length fade, so a short buffer would leave a
+    /// hole at the end of the overlap.
+    #[test]
+    fn a_rendered_curve_fills_the_overlap_exactly() {
+        let rate = 44_100u32;
+        let channels = crate::vis::CHANNELS as usize;
+        let frames = rate as usize * 4;
+        let source = click_track(128.0, 20.0, rate);
+        let rendered = render_curve(&source, 1.2652, frames, channels, rate);
+        assert_eq!(
+            rendered.len(),
+            frames * channels,
+            "the overlap is a fixed length of output"
+        );
+    }
+
+    /// Keylock: stretching the incoming track onto the shared tempo must not
+    /// move its pitch. A varispeed stretch would drag a 220 Hz tone along
+    /// with the tempo, which is what makes a one-deck transition sound wrong.
+    #[test]
+    fn a_rendered_curve_holds_its_pitch() {
+        let rate = 44_100u32;
+        let channels = crate::vis::CHANNELS as usize;
+        let hz = 220.0f64;
+        let seconds = 12.0;
+        let mut source: Vec<f32> = Vec::with_capacity((seconds * f64::from(rate)) as usize * channels);
+        for frame in 0..(seconds * f64::from(rate)) as usize {
+            let value = (2.0 * std::f32::consts::PI * hz as f32 * frame as f32 / rate as f32).sin() * 0.5;
+            for _ in 0..channels {
+                source.push(value);
+            }
+        }
+        let frames = rate as usize * 8;
+        let rendered = render_curve(&source, 1.2652, frames, channels, rate);
+        assert!(!rendered.is_empty(), "the curve rendered nothing");
+
+        // Count zero crossings over the steady middle, away from whatever the
+        // first and last pieces do.
+        let frames_out = rendered.len() / channels;
+        let start = frames_out / 4;
+        let end = frames_out * 3 / 4;
+        let mono: Vec<f32> = rendered[start * channels..end * channels]
+            .chunks(channels)
+            .map(|frame| frame[0])
+            .collect();
+        let crossings = mono
+            .windows(2)
+            .filter(|pair| (pair[0] < 0.0) != (pair[1] < 0.0))
+            .count();
+        let heard = crossings as f64 * f64::from(rate) / (2.0 * mono.len() as f64);
+        assert!(
+            (heard - hz).abs() < 10.0,
+            "keylock moved the pitch: heard {heard:.1} Hz for a {hz:.0} Hz tone"
+        );
+    }
+
+    /// The render has to line up with the outgoing deck's clock, because the
+    /// two are mixed frame for frame. The engine holds a pipeline of its own
+    /// and its fill sits at the head of the render, so a trim that is off by
+    /// even a little would slide the whole overlap.
+    ///
+    /// Checked at a ratio of 1.0, where the beats must land where they do in
+    /// the source. The engine still runs the keylock stages at that rate, so
+    /// the samples are not identical — but the beats are unmoved.
+    #[test]
+    fn a_rendered_curve_keeps_the_beats_where_the_track_has_them() {
+        let rate = 44_100u32;
+        let channels = crate::vis::CHANNELS as usize;
+        let frames = rate as usize * 4;
+        let source = click_track(128.0, 60.0, rate);
+        let rendered = render_curve(&source, 1.0, frames, channels, rate);
+        assert_eq!(rendered.len(), frames * channels);
+
+        // Rising edges through the half level, as frame indices.
+        let edges = |samples: &[f32]| -> Vec<usize> {
+            let peak = samples
+                .iter()
+                .fold(0.0f32, |worst, sample| worst.max(sample.abs()));
+            let half = peak / 2.0;
+            let mono: Vec<f32> = samples.chunks(channels).map(|frame| frame[0]).collect();
+            mono.windows(2)
+                .enumerate()
+                .filter(|(_, pair)| pair[0] < half && pair[1] >= half)
+                .map(|(index, _)| index)
+                .collect()
+        };
+        // The same span of the track, so the two counts are comparable.
+        let opening = &source[..frames * channels];
+        let from_source = edges(opening);
+        let from_render = edges(&rendered);
+        assert!(from_source.len() >= 4, "the fixture produced no beats");
+        assert_eq!(
+            from_source.len(),
+            from_render.len(),
+            "the render changed how many beats the overlap carries"
+        );
+        // Every beat within a millisecond of where the track has it: the
+        // keylock filters, so an edge is not sample-exact, but a pipeline
+        // trim that was wrong would show up as a drift, not a jitter.
+        for (index, (before, after)) in from_source.iter().zip(&from_render).enumerate() {
+            let drift = (*before as i64 - *after as i64).abs();
+            assert!(
+                drift < 44,
+                "beat {index} moved {drift} frames ({:.1} ms) between the track and the render",
+                drift as f64 / 44.1
+            );
+        }
+    }
+
+    /// Nothing to render must produce nothing, so the caller can fall back
+    /// instead of mixing a hole into the overlap.
+    #[test]
+    fn an_empty_source_renders_nothing() {
+        assert!(render_curve(&[], 1.2, 44_100, 2, 44_100).is_empty());
+        assert!(render_curve(&[0.0; 8], 1.2, 0, 2, 44_100).is_empty());
+        assert!(render_curve(&[0.0; 8], f64::NAN, 100, 2, 44_100).is_empty());
+    }
+
+    /// The rendered overlap has to walk the incoming track at the curve's
+    /// own tempo, not at a constant one. The observable is how much of the
+    /// track passes: at `ratio^(p-1)` the mean rate is the integral
+    /// `(ratio - 1) / (ratio · ln ratio)`, which for this pair is about 0.891
+    /// — so a four-second overlap must contain about 0.891 × 4 seconds of the
+    /// track's own beats, not 4 and not the geometric middle's 1.12 × 4.
+    #[test]
+    fn a_rendered_curve_walks_the_track_at_the_curve_tempo() {
+        let rate = 44_100u32;
+        let channels = crate::vis::CHANNELS as usize;
+        let ratio = 1.2652;
+        let frames = rate as usize * 4;
+        let source = click_track(128.0, 60.0, rate);
+
+        let rendered = render_curve(&source, ratio, frames, channels, rate);
+        assert_eq!(rendered.len(), frames * channels);
+
+        let beats = count_onsets(&rendered, channels);
+        // What the curve says should pass, against what a constant render
+        // would have given.
+        let curve_seconds = (ratio - 1.0) / (ratio * ratio.ln()) * 4.0;
+        let flat_seconds = 4.0;
+        let beat = 60.0 / 128.0;
+        let expected = curve_seconds / beat;
+        let flat = flat_seconds / beat;
+
+        assert!(
+            (beats as f64 - expected).abs() < 1.5,
+            "the overlap carried {beats} beats; the curve predicts {expected:.1}"
+        );
+        // And it must be distinguishable from a constant-rate render, or
+        // this would pass for the wrong reason.
+        assert!(
+            (beats as f64 - flat).abs() > 1.0,
+            "{beats} beats is also what a flat render gives ({flat:.1}), so nothing was proven"
+        );
+    }
+
 
     /// The bug this covers: the sample window only reaches the first 60
     /// seconds, so on a long track the loudest part *it* holds is an early

@@ -19,7 +19,19 @@ use crate::automix_track::{Collector, Worker, envelope_with_bands};
 
 /// How long before a transition's own lead-in the plan is armed, so a slow
 /// decode or a late probe still has time to change the decision.
-const PLAN_SLACK: Duration = Duration::from_secs(5);
+///
+/// It has to cover the whole round trip that produces the tempo matching: the
+/// arm is what triggers the preload, the preload is what fetches the track the
+/// probe is read from, and the probe then has to be decoded and analysed
+/// before the exit arrives. Measured on a real boundary, that trip takes about
+/// five seconds — three from the arm to the probe landing, two more to the
+/// grid. At the five seconds this used to be, the grid therefore arrived at
+/// the exit rather than before it and no pair was ever matched; the revision
+/// below could not run at all.
+///
+/// Thirty seconds leaves that trip six times over, so the grid is in hand
+/// well before the decision has to be final.
+const PLAN_SLACK: Duration = Duration::from_secs(30);
 
 /// Plans and arms transitions for one engine.
 ///
@@ -98,31 +110,27 @@ impl Automix {
     /// The transition to hand the player for the coming boundary, or `None`
     /// when nothing changed.
     ///
-    /// A plan is handed over once and then left alone until the boundary
-    /// passes. It must not be withdrawn as the play head reaches it: the
-    /// exit is the moment the transition starts, so taking the plan away on
-    /// the way there leaves the boundary with no crossfade at all.
+    /// The player holds the best plan known for the coming boundary and is
+    /// told again only when that plan changes. Re-sending the same one would
+    /// be pointless, and sending `None` would take the boundary's crossfade
+    /// away entirely: reaching the exit must not disturb the plan, because
+    /// the exit *is* the moment the transition starts. [`Self::plan`] returns
+    /// `None` once there is no room left, which is why that case is left
+    /// alone rather than forwarded.
     ///
-    /// It is revised, though, when the incoming track's grid arrives after
-    /// the plan was armed. Arming has to happen early — the player decides
-    /// when to preload the next track from the plan in hand, so a plan that
-    /// waited for the probe would never trigger the preload that produces
-    /// it. The first plan therefore carries no tempo matching, and this
-    /// replaces it once the probe has been analysed.
+    /// The plan changes for two reasons. Arming has to happen early — the
+    /// player decides when to preload the next track from the plan in hand,
+    /// so a plan that waited for the probe would never trigger the preload
+    /// that produces it — so the first plan carries no tempo matching and is
+    /// replaced once the probe has been analysed. The other is the outgoing
+    /// track's own structure: the exit comes from the loud sections found so
+    /// far, and a later reading can move it.
     pub fn take_plan_change(
         &mut self,
         elapsed: Duration,
         out_duration: Duration,
     ) -> Option<Option<automix::Transition>> {
         let planned = self.plan(elapsed, out_duration)?;
-        // A plan armed before the incoming grid existed is provisional, and
-        // is replaced as soon as a matched one is available.
-        let provisional = self.armed.as_ref().is_some_and(|armed| {
-            armed.tempo_ratio == 1.0
-        }) && planned.tempo_ratio != 1.0;
-        if self.armed.is_some() && !provisional {
-            return None;
-        }
         // Hold the first plan as soon as there is one: it is what tells the
         // player the next track has to be fetched early enough to analyse.
         let lead_in = out_duration
@@ -132,13 +140,25 @@ impl Automix {
         if !due {
             return None;
         }
-        if provisional {
-            log::debug!(
-                "automix: revising the transition to {:.4}x now the incoming grid is in",
-                planned.tempo_ratio
-            );
+        match &self.armed {
+            // Already holding this exact plan: nothing to say.
+            Some(armed) if *armed == planned => return None,
+            Some(armed) => {
+                if armed.tempo_ratio != planned.tempo_ratio {
+                    log::debug!(
+                        "automix: revising the transition to {:.4}x now the incoming grid is in",
+                        planned.tempo_ratio
+                    );
+                } else if (armed.fade_out_at - planned.fade_out_at).abs() > 0.01 {
+                    log::debug!(
+                        "automix: moving the exit to {:.2}s; the track's structure reads differently now",
+                        planned.fade_out_at
+                    );
+                }
+            }
+            None => {}
         }
-        self.armed = Some(planned.clone());
+        self.armed = Some(planned);
         Some(Some(planned))
     }
 
