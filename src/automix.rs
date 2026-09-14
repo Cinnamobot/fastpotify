@@ -86,13 +86,32 @@ impl Analysis {
     /// channels. `timestretch` wants the mono mid downmix, so this folds the
     /// channels first.
     pub fn of(samples: &[f32], sample_rate: u32) -> Option<Self> {
+        Self::of_with_envelope(samples, sample_rate, &[])
+    }
+
+    /// Beat-track interleaved samples, taking the track's structure from a
+    /// whole-track energy envelope when one is available.
+    ///
+    /// The samples only reach as far as the analysis window, so on their own
+    /// they can only say where the loudest part *of that window* is. The
+    /// envelope covers the whole track, so it is what knows where the last
+    /// chorus is — which is the thing automix has to leave after.
+    pub fn of_with_envelope(
+        samples: &[f32],
+        sample_rate: u32,
+        envelope: &[f64],
+    ) -> Option<Self> {
         if samples.is_empty() {
             return None;
         }
         let mono = timestretch::downmix_to_mid(samples, crate::vis::CHANNELS as usize);
         let grid = timestretch::detect_beat_grid(&mono, sample_rate);
         let mut analysis = Self::from_grid(grid)?;
-        analysis.bar_loudness = analysis.measure_bar_loudness(samples, sample_rate);
+        if envelope.is_empty() {
+            analysis.bar_loudness = analysis.measure_bar_loudness(samples, sample_rate);
+        } else {
+            analysis.bar_loudness = analysis.measure_envelope_loudness(envelope);
+        }
         Some(analysis)
     }
 
@@ -108,6 +127,20 @@ impl Analysis {
             return None;
         }
         Some(self.offset_in_track + self.bar_loudness.len() as f64 * self.bar_seconds())
+    }
+
+    /// Re-reads the track's structure from a fresh energy envelope, keeping
+    /// the beat grid it already has.
+    ///
+    /// The grid comes from a bounded window and does not change; where the
+    /// sections are only becomes clear as more of the track is heard. This
+    /// is how the planner learns about a later chorus without paying for
+    /// another beat-tracking pass.
+    pub fn refresh_structure(&mut self, envelope: &[f64]) {
+        if envelope.is_empty() {
+            return;
+        }
+        self.bar_loudness = self.measure_envelope_loudness(envelope);
     }
 
     /// The loudness profile of the audio this analysis came from.
@@ -140,6 +173,28 @@ impl Analysis {
     pub fn anchored_at(mut self, seconds: f64) -> Self {
         self.offset_in_track = seconds.max(0.0);
         self
+    }
+
+    /// Per-bar loudness from a whole-track energy envelope.
+    ///
+    /// The envelope's readings are one per hop, in track order, so bar `n`
+    /// covers hops `[n * bar, (n + 1) * bar)`. A bar's loudness is the mean
+    /// of its hops rather than a peak: the sections a DJ mixes over are the
+    /// ones that stay loud, not the ones with a single hit in them.
+    fn measure_envelope_loudness(&self, envelope: &[f64]) -> Vec<f64> {
+        let bar = self.bar_seconds();
+        if !(bar.is_finite() && bar > 0.0) {
+            return Vec::new();
+        }
+        let hops_per_bar = (bar / crate::automix_track::ENERGY_HOP_SECONDS).round() as usize;
+        if hops_per_bar == 0 {
+            return Vec::new();
+        }
+        envelope
+            .chunks(hops_per_bar)
+            .filter(|span| span.len() * 2 >= hops_per_bar)
+            .map(|span| span.iter().sum::<f64>() / span.len() as f64)
+            .collect()
     }
 
     /// Scores every bar by how loud it is relative to the rest of the track.
@@ -223,8 +278,9 @@ impl Analysis {
         Some(phase + exit_bar as f64 * bar)
     }
 
-    /// The bar length in seconds.
-    fn bar_seconds(&self) -> f64 {
+    /// The bar length in seconds. Public because a caller reading the
+    /// loudness profile has to know how much track each entry covers.
+    pub fn bar_seconds(&self) -> f64 {
         BEATS_PER_BAR * 60.0 / self.bpm
     }
 
@@ -517,6 +573,118 @@ mod tests {
             *sample *= 6.0;
         }
         samples
+    }
+
+    /// The bug this covers: the sample window only reaches the first 60
+    /// seconds, so on a long track the loudest part *it* holds is an early
+    /// chorus. A whole-track energy envelope knows about the later one, and
+    /// the planner must leave after that instead.
+    #[test]
+    fn the_envelope_finds_a_chorus_the_sample_window_never_saw() {
+        // A track whose chorus is at 150s, far past the 60s window.
+        let samples = click_track_with_chorus(128.0, 200.0, 44_100, 150.0, 175.0);
+        let rate = 44_100;
+        let channels = crate::vis::CHANNELS as usize;
+
+        // What the collector keeps: the opening only.
+        let window = (crate::automix_track::ANALYSED_SECONDS * f64::from(rate)) as usize * channels;
+        let opening = &samples[..window.min(samples.len())];
+        let from_window = Analysis::of(opening, rate).expect("the opening is analysable");
+
+        // What the envelope covers: the whole track.
+        let envelope = crate::automix_track::envelope_of(&samples);
+        let from_envelope =
+            Analysis::of_with_envelope(opening, rate, &envelope).expect("analysable");
+
+        let bars = 4usize;
+        // The window's own view cannot see the late chorus, so its loudest
+        // span is early — this is the trap the planner used to fall into.
+        let window_span = from_window.loudest_span(from_window.bar_loudness(), bars);
+        assert!(
+            window_span.is_none_or(|span| span < 100.0),
+            "the window should not know about a chorus at 150s, got {window_span:?}"
+        );
+
+        // The envelope does see it, and it is where the chorus is.
+        let span = from_envelope
+            .loudest_span(from_envelope.bar_loudness(), bars)
+            .expect("the envelope sees the chorus");
+        assert!(
+            (145.0..180.0).contains(&span),
+            "expected the chorus near 150s, got {span:.1}s"
+        );
+
+        // And it reports reaching the end of the track, which is what lets
+        // the planner trust it as the *last* chorus.
+        let until = from_envelope.analysed_until().expect("a loudness profile");
+        assert!(
+            until >= 195.0,
+            "the envelope should cover the track, reached {until:.1}s"
+        );
+    }
+
+    /// The envelope must be cheap enough to hold a whole track: this is the
+    /// reason it exists rather than keeping every sample.
+    #[test]
+    fn the_envelope_is_far_smaller_than_the_audio() {
+        let seconds = 360.0;
+        let rate = 44_100u32;
+        let channels = crate::vis::CHANNELS as usize;
+        let samples = vec![0.5f32; (seconds * f64::from(rate)) as usize * channels];
+        let envelope = crate::automix_track::envelope_of(&samples);
+
+        let audio_bytes = samples.len() * std::mem::size_of::<f32>();
+        let envelope_bytes = envelope.len() * std::mem::size_of::<f64>();
+        assert!(
+            envelope_bytes * 1000 < audio_bytes,
+            "the envelope must be orders of magnitude smaller: \
+             {envelope_bytes} vs {audio_bytes} bytes"
+        );
+        // One reading per hop, as the contract says.
+        let expected = (seconds / crate::automix_track::ENERGY_HOP_SECONDS) as usize;
+        assert!(
+            envelope.len().abs_diff(expected) <= 1,
+            "expected about {expected} readings, got {}",
+            envelope.len()
+        );
+    }
+
+    /// The point of the whole-track envelope: with it, the planner can leave
+    /// after the track's *last* chorus rather than falling back to the outro,
+    /// and it still never leaves before a chorus has had its say.
+    #[test]
+    fn a_late_chorus_becomes_the_exit_rather_than_the_outro() {
+        // Chorus at 150-175s of a 200s track, so there is room to fade out
+        // after it and the outro is at 190s or so.
+        let samples = click_track_with_chorus(128.0, 200.0, 44_100, 150.0, 175.0);
+        let rate = 44_100;
+        let channels = crate::vis::CHANNELS as usize;
+        let window = (crate::automix_track::ANALYSED_SECONDS * f64::from(rate)) as usize * channels;
+        let opening = &samples[..window.min(samples.len())];
+
+        let envelope = crate::automix_track::envelope_of(&samples);
+        let with_envelope =
+            Analysis::of_with_envelope(opening, rate, &envelope).expect("analysable");
+        let planned = plan_exit_matched(
+            &with_envelope,
+            None,
+            Duration::from_secs(200),
+            0.0,
+        )
+        .expect("a 200s track has room");
+
+        // The exit lands on or after the chorus, never inside it.
+        assert!(
+            planned.fade_out_at >= 175.0,
+            "the fade must not start inside the chorus: exit at {:.1}s",
+            planned.fade_out_at
+        );
+        // ...and it is not dragged all the way to the outro for no reason.
+        assert!(
+            planned.fade_out_at < 195.0,
+            "the chorus exit should be used, got {:.1}s",
+            planned.fade_out_at
+        );
     }
 
     #[test]

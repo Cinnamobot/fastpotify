@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::automix::{self, Analysis};
-use crate::automix_track::{Collector, Worker};
+use crate::automix_track::{Collector, Worker, envelope_of};
 
 /// How long before a transition's own lead-in the plan is armed, so a slow
 /// decode or a late probe still has time to change the decision.
@@ -43,6 +43,9 @@ pub struct Automix {
     /// The transition currently handed to the player, so it is only sent
     /// again when it actually changes.
     armed: Option<automix::Transition>,
+    /// How many envelope readings the structure was last read from, so a
+    /// refresh only runs when the envelope has actually grown.
+    restructured_at: usize,
 }
 
 impl std::fmt::Debug for Automix {
@@ -64,6 +67,7 @@ impl Automix {
             incoming_worker: Worker::spawn(sample_rate),
             incoming: None,
             armed: None,
+            restructured_at: 0,
         })
     }
 
@@ -161,7 +165,11 @@ impl Automix {
         );
         self.incoming = None;
         self.incoming_from = probe.position_seconds;
-        self.incoming_worker.analyse(probe.samples.clone());
+        // The probe's own audio is all there is of the incoming track, so
+        // its envelope is measured from it directly rather than collected
+        // from the sink the way the playing track's is.
+        let envelope = envelope_of(&probe.samples);
+        self.incoming_worker.analyse(probe.samples.clone(), envelope);
     }
 
     /// The preloaded track's grid, read in its own time, once it is ready.
@@ -187,23 +195,80 @@ impl Automix {
         if self.collector.is_empty() {
             self.collected_from = position.as_secs_f64();
         }
-        if self.playing.is_some() || !self.collector.is_ready(sample_rate) {
-            return;
-        }
-        if let Some(analysis) = self.worker.latest() {
-            log::debug!(
-                "automix: beat grid ready at {:.1} BPM, anchored at {:.1}s",
-                analysis.bpm,
-                self.collected_from
-            );
+        // A published analysis is always picked up, not only the first: the
+        // structure is re-read as the track plays, and those results replace
+        // the one that was kept.
+        let published = self.worker.latest();
+        let fresh = match (&self.playing, &published) {
+            (None, Some(_)) => true,
+            (Some(old), Some(new)) => new.bar_loudness().len() > old.bar_loudness().len(),
+            _ => false,
+        };
+        if fresh {
+            let analysis = published.expect("checked by `fresh`");
+            if self.playing.is_none() {
+                log::debug!(
+                    "automix: beat grid ready at {:.1} BPM, anchored at {:.1}s",
+                    analysis.bpm,
+                    self.collected_from
+                );
+            } else {
+                log::debug!(
+                    "automix: structure re-read, now covering {:.0}s of the track",
+                    analysis.analysed_until().unwrap_or(0.0)
+                );
+            }
             self.playing = Some(analysis);
             return;
         }
-        log::debug!(
-            "automix: handing collected audio (from {:.1}s) to the analyser",
-            self.collected_from
-        );
-        self.worker.analyse(self.collector.snapshot());
+        if self.playing.is_none() {
+            if !self.collector.is_ready(sample_rate) {
+                return;
+            }
+            let envelope = self.collector.envelope_rms();
+            self.restructured_at = envelope.len();
+            log::debug!(
+                "automix: handing collected audio (from {:.1}s) to the analyser",
+                self.collected_from
+            );
+            self.worker.analyse(self.collector.snapshot(), envelope);
+            return;
+        }
+
+        // The grid is settled, but where the track's sections are only
+        // becomes clear as more of it is heard — and leaving before the last
+        // chorus is the thing this has to avoid. Re-reading the structure
+        // against the longer envelope costs no beat tracking.
+        let reached = self.collector.envelope_len();
+        if !self.structure_is_stale(reached) {
+            return;
+        }
+        self.restructured_at = reached;
+        self.worker.restructure(self.collector.envelope_rms());
+    }
+
+    /// Whether the published analysis describes fewer bars than the
+    /// envelope has completed, and one has not already been asked for.
+    ///
+    /// The published bar count is compared against the envelope rather than
+    /// tracked separately, so a refresh is requested whenever the readings
+    /// have genuinely run ahead — and `restructured_at` stops a request from
+    /// being re-sent for an envelope already handed over.
+    fn structure_is_stale(&self, readings: usize) -> bool {
+        if readings <= self.restructured_at {
+            return false;
+        }
+        let Some(playing) = self.playing.as_ref() else {
+            return false;
+        };
+        let hops_per_bar =
+            (playing.bar_seconds() / crate::automix_track::ENERGY_HOP_SECONDS).round();
+        if !(hops_per_bar >= 1.0) {
+            return false;
+        }
+        // Whole bars the envelope has completed, less the one still filling.
+        let whole_bars = readings as f64 / hops_per_bar - 1.0;
+        (playing.bar_loudness().len() as f64) + 1.0 < whole_bars
     }
 
     /// The overlap to use for the coming boundary, if one can be planned.

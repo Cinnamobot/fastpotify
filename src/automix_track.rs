@@ -20,15 +20,111 @@ use crate::automix::Analysis;
 /// enough to finish well inside a track's runtime.
 pub const ANALYSED_SECONDS: f64 = 60.0;
 
+/// How often the energy envelope takes a reading, in seconds. Fine enough to
+/// resolve a bar at the fastest tempo worth mixing, coarse enough that an
+/// hour of audio costs a few hundred kilobytes.
+pub const ENERGY_HOP_SECONDS: f64 = 0.05;
+
+/// Longest stretch the envelope covers. A stream that never ends must not
+/// grow the buffer without bound.
+const ENERGY_MAX_SECONDS: f64 = 3600.0;
+
 /// Frames the collector keeps before it stops appending.
 fn keep_frames(sample_rate: u32) -> usize {
     (ANALYSED_SECONDS * f64::from(sample_rate)) as usize
+}
+
+/// A whole-track energy envelope, one RMS reading per [`ENERGY_HOP_SECONDS`].
+///
+/// Finding where a track's sections are needs the whole track, but keeping
+/// every sample of one would cost hundreds of megabytes. This carries the
+/// same structural information for a few hundred kilobytes; the tempo it is
+/// read against comes from the bounded sample window kept alongside it.
+#[derive(Debug)]
+struct Envelope {
+    /// One RMS reading per completed hop, in track order.
+    values: Vec<f32>,
+    /// Sum of squares for the hop in progress.
+    partial: f64,
+    /// Samples counted into `partial`.
+    partial_samples: usize,
+    /// Samples per hop, across every channel.
+    hop_samples: usize,
+    /// Most readings to keep.
+    max_values: usize,
+}
+
+impl Envelope {
+    fn new(sample_rate: u32) -> Self {
+        let hop_samples = (ENERGY_HOP_SECONDS * f64::from(sample_rate)) as usize
+            * crate::vis::CHANNELS as usize;
+        Self {
+            values: Vec::new(),
+            partial: 0.0,
+            partial_samples: 0,
+            hop_samples: hop_samples.max(1),
+            max_values: (ENERGY_MAX_SECONDS / ENERGY_HOP_SECONDS) as usize,
+        }
+    }
+
+    /// Folds interleaved samples into the envelope. Allocation-free, so the
+    /// sink's thread can call it for every packet.
+    fn push(&mut self, interleaved: &[f64]) {
+        let mut rest = interleaved;
+        while !rest.is_empty() && self.values.len() < self.max_values {
+            let take = (self.hop_samples - self.partial_samples).min(rest.len());
+            for sample in &rest[..take] {
+                self.partial += sample * sample;
+            }
+            self.partial_samples += take;
+            rest = &rest[take..];
+            if self.partial_samples == self.hop_samples {
+                let mean = self.partial / self.hop_samples as f64;
+                self.values.push(mean.sqrt() as f32);
+                self.partial = 0.0;
+                self.partial_samples = 0;
+            }
+        }
+    }
+
+    /// The readings taken so far, oldest first.
+    fn rms(&self) -> Vec<f64> {
+        self.values.iter().map(|value| f64::from(*value)).collect()
+    }
+
+    fn clear(&mut self) {
+        self.values.clear();
+        self.partial = 0.0;
+        self.partial_samples = 0;
+    }
+}
+
+/// Builds an energy envelope from interleaved samples in one pass.
+///
+/// The probe's audio arrives whole rather than streamed through the sink, so
+/// it needs the same envelope without a [`Collector`] to accumulate it.
+pub fn envelope_of(interleaved: &[f32]) -> Vec<f64> {
+    let hop = (ENERGY_HOP_SECONDS * f64::from(crate::vis::SAMPLE_RATE)) as usize
+        * crate::vis::CHANNELS as usize;
+    let hop = hop.max(1);
+    interleaved
+        .chunks(hop)
+        .filter(|span| span.len() * 2 >= hop)
+        .map(|span| {
+            let energy: f64 = span
+                .iter()
+                .map(|sample| f64::from(*sample) * f64::from(*sample))
+                .sum();
+            (energy / span.len() as f64).sqrt()
+        })
+        .collect()
 }
 
 /// Accumulates the playing track's samples for analysis.
 pub struct Collector {
     samples: Mutex<Vec<f32>>,
     limit: usize,
+    envelope: Mutex<Envelope>,
 }
 
 impl std::fmt::Debug for Collector {
@@ -42,6 +138,7 @@ impl Collector {
         Arc::new(Self {
             samples: Mutex::new(Vec::new()),
             limit: keep_frames(sample_rate) * crate::vis::CHANNELS as usize,
+            envelope: Mutex::new(Envelope::new(sample_rate)),
         })
     }
 
@@ -49,6 +146,11 @@ impl Collector {
     /// Called from the sink's thread for every decoded packet, so it takes
     /// the samples directly rather than through a copy.
     pub fn push(&self, interleaved: &[f64]) {
+        // The envelope sees the whole track; the sample window does not.
+        self.envelope
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .push(interleaved);
         let mut samples = self
             .samples
             .lock()
@@ -59,6 +161,24 @@ impl Collector {
         let room = self.limit - samples.len();
         let take = room.min(interleaved.len());
         samples.extend(interleaved[..take].iter().map(|sample| *sample as f32));
+    }
+
+    /// The whole-track energy envelope, one reading per hop.
+    pub fn envelope_rms(&self) -> Vec<f64> {
+        self.envelope
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .rms()
+    }
+
+    /// How many energy readings have been taken. Cheap enough to call on
+    /// every position update, unlike the envelope itself.
+    pub fn envelope_len(&self) -> usize {
+        self.envelope
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .values
+            .len()
     }
 
     /// Whether nothing has been collected yet.
@@ -72,6 +192,10 @@ impl Collector {
     /// Drops what was collected, for the next track.
     pub fn clear(&self) {
         self.samples
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clear();
+        self.envelope
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .clear();
@@ -102,9 +226,20 @@ impl Collector {
 /// Dropping the handle stops the worker. The most recent request wins: a
 /// track skipped before its analysis finished does not publish a result.
 pub struct Worker {
-    request: Mutex<Option<Sender<Vec<f32>>>>,
+    request: Mutex<Option<Sender<Job>>>,
     result: Arc<Mutex<Option<Analysis>>>,
     join: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Work handed to the analysis thread.
+enum Job {
+    /// Full analysis of a track's opening: the beat grid comes from these
+    /// samples, and the structure from the envelope covering them.
+    Analyse { samples: Vec<f32>, envelope: Vec<f64> },
+    /// Re-read the structure from a longer envelope, keeping the grid that
+    /// was already tracked. Much cheaper than another beat-tracking pass,
+    /// which is what makes it affordable to do as a track plays.
+    Restructure(Vec<f64>),
 }
 
 impl std::fmt::Debug for Worker {
@@ -115,21 +250,45 @@ impl std::fmt::Debug for Worker {
 
 impl Worker {
     pub fn spawn(sample_rate: u32) -> Self {
-        let (tx, rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = std::sync::mpsc::channel();
+        let (tx, rx): (Sender<Job>, Receiver<Job>) = std::sync::mpsc::channel();
         let result = Arc::new(Mutex::new(None));
         let published = Arc::clone(&result);
         let join = std::thread::Builder::new()
             .name("automix-analysis".into())
             .spawn(move || {
-                // Only the newest request matters.
-                while let Ok(mut samples) = rx.recv() {
+                // Only the newest request of each kind matters. A later
+                // envelope is a superset of an earlier one, so the last
+                // restructure queued wins; a full analysis supersedes it.
+                while let Ok(mut job) = rx.recv() {
                     while let Ok(newer) = rx.try_recv() {
-                        samples = newer;
+                        job = match (job, newer) {
+                            (Job::Restructure(_), Job::Restructure(newer)) => {
+                                Job::Restructure(newer)
+                            }
+                            (_, newer @ Job::Analyse { .. }) => newer,
+                            (job, _) => job,
+                        };
                     }
-                    let analysed = Analysis::of(&samples, sample_rate);
-                    *published
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner()) = analysed;
+                    let analysed = match job {
+                        Job::Analyse { samples, envelope } => {
+                            Analysis::of_with_envelope(&samples, sample_rate, &envelope)
+                        }
+                        Job::Restructure(envelope) => {
+                            let mut current: Option<Analysis> = published
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .clone();
+                            current.as_mut().map(|analysis| {
+                                analysis.refresh_structure(&envelope);
+                                analysis.clone()
+                            })
+                        }
+                    };
+                    if analysed.is_some() {
+                        *published
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner()) = analysed;
+                    }
                 }
             })
             .ok();
@@ -140,14 +299,24 @@ impl Worker {
         }
     }
 
-    /// Queues samples for analysis. Cheap: it moves a buffer and returns.
-    pub fn analyse(&self, samples: Vec<f32>) {
+    /// Queues a track's opening for full analysis. Cheap: it moves a buffer.
+    pub fn analyse(&self, samples: Vec<f32>, envelope: Vec<f64>) {
+        self.send(Job::Analyse { samples, envelope });
+    }
+
+    /// Queues a fresh envelope so the structure is re-read against the
+    /// longer one, without re-tracking the beat.
+    pub fn restructure(&self, envelope: Vec<f64>) {
+        self.send(Job::Restructure(envelope));
+    }
+
+    fn send(&self, job: Job) {
         let guard = self
             .request
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(samples);
+            let _ = tx.send(job);
         }
     }
 
@@ -237,7 +406,8 @@ mod tests {
             t += beat;
         }
 
-        worker.analyse(samples);
+        let envelope = envelope_of(&samples);
+        worker.analyse(samples, envelope);
         // The worker is a thread; give it a bounded moment to publish.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let mut published = None;
@@ -259,10 +429,10 @@ mod tests {
     #[test]
     fn a_worker_with_silence_publishes_nothing() {
         let worker = Worker::spawn(44_100);
-        worker.analyse(vec![
-            0.0f32;
-            44_100 * 10 * crate::vis::CHANNELS as usize
-        ]);
+        worker.analyse(
+            vec![0.0f32; 44_100 * 10 * crate::vis::CHANNELS as usize],
+            Vec::new(),
+        );
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(worker.latest().is_none());
     }
