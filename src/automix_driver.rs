@@ -92,20 +92,19 @@ impl Automix {
     }
 
     /// The transition to hand the player for the coming boundary, or `None`
-    /// when the boundary should keep the player's own crossfade.
+    /// when nothing changed.
     ///
-    /// A plan is armed once, near the boundary, and then left alone. It must
-    /// not be withdrawn as the play head reaches it: the exit is the moment
-    /// the transition starts, so re-deciding on the way there takes the plan
-    /// away at the one instant it is needed, and the boundary plays as a
-    /// plain cut instead.
+    /// A plan is handed over once and then left alone until the boundary
+    /// passes. It must not be withdrawn as the play head reaches it: the
+    /// exit is the moment the transition starts, so taking the plan away on
+    /// the way there leaves the boundary with no crossfade at all.
     ///
-    /// A plan is revised, though, when the incoming track's grid arrives
-    /// after it was armed. Arming has to happen early — the player decides
+    /// It is revised, though, when the incoming track's grid arrives after
+    /// the plan was armed. Arming has to happen early — the player decides
     /// when to preload the next track from the plan in hand, so a plan that
-    /// waited for the probe would never get one. The first plan therefore
-    /// carries no tempo matching, and this replaces it once the probe has
-    /// been analysed, which the early arming is what makes possible.
+    /// waited for the probe would never trigger the preload that produces
+    /// it. The first plan therefore carries no tempo matching, and this
+    /// replaces it once the probe has been analysed.
     pub fn take_plan_change(
         &mut self,
         elapsed: Duration,
