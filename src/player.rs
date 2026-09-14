@@ -736,6 +736,12 @@ async fn run_events(
             _ => {}
         }
         if let Some(automix) = &mut automix {
+            if let PlayerEvent::IncomingPreloaded { probe, .. } = &event {
+                automix.incoming(&crate::automix::Probe {
+                    samples: probe.samples.clone(),
+                    position_seconds: f64::from(probe.position_ms) / 1000.0,
+                });
+            }
             drive_automix(automix, &player, &state, &event);
         }
         let snapshot = {
@@ -908,6 +914,7 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
             set(&mut state.repeat, mode)
         }
         PlayerEvent::Preloading { .. }
+        | PlayerEvent::IncomingPreloaded { .. }
         | PlayerEvent::TimeToPreloadNextTrack { .. }
         | PlayerEvent::EndOfTrack { .. }
         | PlayerEvent::PlayRequestIdChanged { .. }

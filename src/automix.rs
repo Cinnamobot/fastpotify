@@ -43,6 +43,27 @@ const MIN_CONFIDENCE: f32 = 0.35;
 /// what nearly all the material Spotify mixes uses.
 const BEATS_PER_BAR: f64 = 4.0;
 
+/// Bars a track must have been analysed for before its loudness profile is
+/// worth reading as structure rather than noise.
+const SECTION_BARS: usize = 8;
+
+/// How much louder than the track's median bar a span must be to count as
+/// its chorus. RMS amplitude, so this is a modest margin in decibels.
+const CHORUS_PROMINENCE: f64 = 1.12;
+
+/// The opening of a track that has been prepared but not yet played.
+///
+/// A player that preloads the next track can hand its opening over before
+/// it starts, which is the only chance to measure a track the sink is not
+/// playing yet.
+#[derive(Clone, Debug)]
+pub struct Probe {
+    /// Interleaved samples at the player's sample rate.
+    pub samples: Vec<f32>,
+    /// Seconds into the track where the samples begin.
+    pub position_seconds: f64,
+}
+
 /// A beat grid and the tempo it was tracked at.
 #[derive(Clone, Debug)]
 pub struct Analysis {
@@ -54,6 +75,8 @@ pub struct Analysis {
     /// Seconds into the track where the collected audio began. The grid's
     /// positions are relative to that point, not to the track's start.
     pub offset_in_track: f64,
+    /// Per-bar loudness of the analysed audio, for finding the chorus.
+    bar_loudness: Vec<f64>,
 }
 
 impl Analysis {
@@ -67,7 +90,15 @@ impl Analysis {
             return None;
         }
         let mono = timestretch::downmix_to_mid(samples, crate::vis::CHANNELS as usize);
-        Self::from_grid(timestretch::detect_beat_grid(&mono, sample_rate))
+        let grid = timestretch::detect_beat_grid(&mono, sample_rate);
+        let mut analysis = Self::from_grid(grid)?;
+        analysis.bar_loudness = analysis.measure_bar_loudness(samples, sample_rate);
+        Some(analysis)
+    }
+
+    /// The loudness profile of the audio this analysis came from.
+    pub fn bar_loudness(&self) -> &[f64] {
+        &self.bar_loudness
     }
 
     fn from_grid(grid: BeatGrid) -> Option<Self> {
@@ -81,6 +112,7 @@ impl Analysis {
             first_beat: grid.beats[0] / f64::from(grid.sample_rate),
             bpm: grid.bpm,
             offset_in_track: 0.0,
+            bar_loudness: Vec::new(),
             grid,
         })
     }
@@ -94,6 +126,87 @@ impl Analysis {
     pub fn anchored_at(mut self, seconds: f64) -> Self {
         self.offset_in_track = seconds.max(0.0);
         self
+    }
+
+    /// Scores every bar by how loud it is relative to the rest of the track.
+    ///
+    /// A chorus or a drop is the loudest, most consistent part of a track,
+    /// which is where a DJ brings the next one in. Loudness is measured per
+    /// bar over the audio that was analysed and keyed by bar index, so the
+    /// caller can pick the loudest span that has room for a transition.
+    ///
+    /// Sections cannot be detected from a few seconds of audio, so a track
+    /// whose analysis covered too little returns nothing and the caller
+    /// falls back to the outro.
+    fn measure_bar_loudness(&self, samples: &[f32], sample_rate: u32) -> Vec<f64> {
+        let channels = crate::vis::CHANNELS as usize;
+        let bar = self.bar_seconds();
+        if !(bar.is_finite() && bar > 0.0) {
+            return Vec::new();
+        }
+        let frames = samples.len() / channels;
+        let bar_frames = (bar * f64::from(sample_rate)) as usize;
+        if bar_frames == 0 || frames < bar_frames * SECTION_BARS {
+            return Vec::new();
+        }
+        samples
+            .chunks(bar_frames * channels)
+            .filter(|span| span.len() >= bar_frames * channels / 2)
+            .map(|span| {
+                let energy: f64 = span
+                    .iter()
+                    .map(|sample| f64::from(*sample) * f64::from(*sample))
+                    .sum();
+                (energy / span.len() as f64).sqrt()
+            })
+            .collect()
+    }
+
+    /// The loudest span of `bars` whole bars, as a start time in track time.
+    ///
+    /// This is where the track's chorus or drop sits, to the resolution of
+    /// the bar grid: a DJ brings the next track in there rather than at the
+    /// outro, so both tracks sound like songs while they overlap instead of
+    /// one fading out.
+    ///
+    /// The span has to stand out from the rest of the track. Without that
+    /// test a track of even loudness — a metronomic one, or any track
+    /// without a quiet stretch — would match its own first bars and the exit
+    /// would land wherever the analysis happened to begin.
+    pub fn loudest_span(&self, loudness: &[f64], bars: usize) -> Option<f64> {
+        if bars == 0 || loudness.len() < bars {
+            return None;
+        }
+        let phase = self.downbeat_phase()?;
+        let bar = self.bar_seconds();
+        // Sum a sliding window so the choice is the loudest *span*, not the
+        // loudest single bar, which would put the exit mid-chorus.
+        let mut best_at = 0usize;
+        let mut best = f64::NEG_INFINITY;
+        let mut window: f64 = loudness[..bars].iter().sum();
+        for start in 0..=(loudness.len() - bars) {
+            if start > 0 {
+                window += loudness[start + bars - 1] - loudness[start - 1];
+            }
+            if window > best {
+                best = window;
+                best_at = start;
+            }
+        }
+
+        // A chorus is louder than the track's own middle. Comparing the
+        // chosen span against the median bar keeps the test relative, so it
+        // holds whether the track was mastered loud or quiet.
+        let mut sorted = loudness.to_vec();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let median = sorted[sorted.len() / 2];
+        if median <= f64::MIN_POSITIVE || (best / bars as f64) < median * CHORUS_PROMINENCE {
+            return None;
+        }
+
+        // The span ends `bars` in, so its exit is the last bar it covers.
+        let exit_bar = best_at + bars - 1;
+        Some(phase + exit_bar as f64 * bar)
     }
 
     /// The bar length in seconds.
@@ -149,7 +262,7 @@ impl Analysis {
     }
 
     /// The first downbeat at or after `seconds`, extrapolating likewise.
-    fn downbeat_at_or_after(&self, seconds: f64) -> Option<f64> {
+    pub fn downbeat_at_or_after(&self, seconds: f64) -> Option<f64> {
         let phase = self.downbeat_phase()?;
         let bar = self.bar_seconds();
         if !(bar.is_finite() && bar > 0.0) || seconds <= phase {
@@ -188,6 +301,17 @@ pub fn bars_of(duration: Duration, bpm: f64) -> f64 {
 /// outgoing track leaves on a downbeat instead of wherever its last sample
 /// falls, and the overlap is a whole number of bars.
 pub fn plan_exit(from: &Analysis, out_duration: Duration) -> Option<Transition> {
+    plan_exit_for(from, out_duration)
+}
+
+/// Plan an exit, preferring the track's loudest section when its structure
+/// has been measured.
+///
+/// A DJ does not wait for the outro. The next track comes in over the
+/// chorus or the drop, where both tracks sound like songs, so the exit is
+/// taken from there when `bar_loudness` has a span that fits the overlap
+/// and still leaves the outgoing track playing afterwards.
+pub fn plan_exit_for(from: &Analysis, out_duration: Duration) -> Option<Transition> {
     let beat_seconds = 60.0 / from.bpm;
     for bars in BAR_CHOICES {
         let seconds = f64::from(bars) * BEATS_PER_BAR * beat_seconds;
@@ -196,11 +320,22 @@ pub fn plan_exit(from: &Analysis, out_duration: Duration) -> Option<Transition> 
             continue;
         }
         let slack = beat_seconds * BEATS_PER_BAR;
-        let latest_start = out_duration.as_secs_f64() - seconds - slack;
-        if latest_start <= from.first_beat {
+        let end_of_track = out_duration.as_secs_f64();
+
+        // Where the chorus is, if the profile is deep enough to say. The
+        // span's exit is used, and it has to leave a bar of music after it
+        // so the overlap is not simply the track ending.
+        let chorus_exit = from
+            .loudest_span(from.bar_loudness(), bars as usize)
+            .filter(|exit| *exit + seconds + slack <= end_of_track);
+
+        let latest_start = end_of_track - seconds - slack;
+        if latest_start <= from.first_beat && chorus_exit.is_none() {
             continue;
         }
-        let Some(fade_out_at) = from.downbeat_at_or_before(latest_start) else {
+
+        let preferred = chorus_exit.or_else(|| from.downbeat_at_or_before(latest_start));
+        let Some(fade_out_at) = preferred else {
             continue;
         };
         return Some(Transition {

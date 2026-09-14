@@ -28,6 +28,13 @@ pub struct Automix {
     /// Seconds into the playing track where the collected audio began, so
     /// the grid it produces can be read in the track's own time.
     collected_from: f64,
+    /// Seconds into the preloaded track where its probe began.
+    incoming_from: f64,
+    /// A second worker for the track being preloaded. It is separate so an
+    /// incoming probe cannot overwrite the grid of the track still playing.
+    incoming_worker: Worker,
+    /// The preloaded track's grid, and where its probe began.
+    incoming: Option<(Analysis, f64)>,
 }
 
 impl std::fmt::Debug for Automix {
@@ -45,6 +52,9 @@ impl Automix {
             worker: Worker::spawn(sample_rate),
             playing: None,
             collected_from: 0.0,
+            incoming_from: 0.0,
+            incoming_worker: Worker::spawn(sample_rate),
+            incoming: None,
         })
     }
 
@@ -53,6 +63,7 @@ impl Automix {
     pub fn track_changed(&mut self) {
         self.collector.clear();
         self.playing = None;
+        self.incoming = None;
     }
 
     /// Called after a seek. The track is unchanged, so a finished grid still
@@ -61,6 +72,37 @@ impl Automix {
     pub fn seeked(&mut self) {
         self.collector.clear();
         self.collected_from = 0.0;
+    }
+
+    /// Receives the opening of the track being preloaded, so the transition
+    /// into it can be planned before it starts.
+    ///
+    /// The incoming track never reaches the sink while it is only preloaded,
+    /// so this probe is the only chance to measure it. Analysis runs on the
+    /// same worker, and the result is kept until the boundary.
+    pub fn incoming(&mut self, probe: &crate::automix::Probe) {
+        if probe.samples.is_empty() {
+            return;
+        }
+        log::debug!(
+            "automix: probing the incoming track from {:.1}s ({} samples)",
+            probe.position_seconds,
+            probe.samples.len()
+        );
+        self.incoming = None;
+        self.incoming_from = probe.position_seconds;
+        self.incoming_worker.analyse(probe.samples.clone());
+    }
+
+    /// The preloaded track's grid, read in its own time, once it is ready.
+    pub fn incoming_analysis(&mut self) -> Option<&Analysis> {
+        if self.incoming.is_none()
+            && let Some(analysis) = self.incoming_worker.latest()
+        {
+            log::debug!("automix: incoming grid ready at {:.1} BPM", analysis.bpm);
+            self.incoming = Some((analysis, self.incoming_from));
+        }
+        self.incoming.as_ref().map(|(analysis, _)| analysis)
     }
 
     /// Called as the track plays, to keep the grid current.
@@ -98,11 +140,25 @@ impl Automix {
     ///
     /// `elapsed` is how far into the playing track the player is, and
     /// `out_duration` is the whole track's length.
-    pub fn plan(&self, elapsed: Duration, out_duration: Duration) -> Option<automix::Transition> {
+    pub fn plan(&mut self, elapsed: Duration, out_duration: Duration) -> Option<automix::Transition> {
+        // Resolve the incoming grid here, so a probe that finished while the
+        // outgoing track was still playing is picked up before it is needed.
+        let incoming = self.incoming_analysis().cloned();
         let playing = self.playing.as_ref()?;
         let anchored = playing.clone().anchored_at(self.collected_from);
         automix::plan_exit(&anchored, out_duration)
             .filter(|transition| transition.fade_out_at >= elapsed.as_secs_f64())
+            .map(|mut transition| {
+                // Starting the incoming track on its own downbeat is what
+                // stops the overlap sounding like one track fading under
+                // another: both land their bar together.
+                if let Some(incoming) = &incoming
+                    && let Some(from) = incoming.downbeat_at_or_after(0.0)
+                {
+                    transition.fade_in_at = from;
+                }
+                transition
+            })
     }
 }
 
@@ -194,5 +250,49 @@ mod tests {
     #[test]
     fn automix_is_off_without_a_collector() {
         assert!(Automix::new(None, 44_100).is_none());
+    }
+
+    /// The incoming track must start on one of its own downbeats, so both
+    /// tracks land their bar together instead of one sliding under the other.
+    #[test]
+    fn an_incoming_grid_moves_the_start_onto_its_downbeat() {
+        let collector = Collector::new(44_100);
+        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
+
+        // The outgoing track, measured from its start.
+        let audio: Vec<f64> = clicks(35.0, 44_100).iter().map(|s| f64::from(*s)).collect();
+        collector.push(&audio);
+        assert!(settle(&mut automix, 44_100), "the outgoing grid is published");
+
+        // A probe of the incoming track, whose grid has its own phase.
+        let probe_samples = clicks(20.0, 44_100);
+        automix.incoming(&crate::automix::Probe {
+            samples: probe_samples,
+            position_seconds: 0.0,
+        });
+
+        // Wait for the probe's grid first: `plan` returns as soon as the
+        // outgoing track has one, which is before the probe is analysed.
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < deadline && automix.incoming_analysis().is_none() {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let incoming = automix
+            .incoming_analysis()
+            .cloned()
+            .expect("the probe produced a grid");
+        let planned = automix
+            .plan(Duration::from_secs(0), Duration::from_secs(240))
+            .expect("a transition is planned");
+        // The start is on the incoming track's bar lattice: a whole number
+        // of bars from its first downbeat.
+        let phase = incoming.downbeat_at_or_after(0.0).unwrap();
+        let bar = 60.0 / incoming.bpm * 4.0;
+        let offset = (planned.fade_in_at - phase) / bar;
+        assert!(
+            (offset - offset.round()).abs() < 1e-6,
+            "start {} is not a whole bar from the incoming phase {phase}",
+            planned.fade_in_at
+        );
     }
 }
