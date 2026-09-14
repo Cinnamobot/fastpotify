@@ -201,10 +201,10 @@ projectm-sys = { git = "https://github.com/crmne/projectm-rs", branch = "respect
 # socket setup, plus an in-memory credential cache for platform storage.
 # Every librespot crate comes from the
 # fork so one copy exists. Drop patches as upstream takes them.
-librespot-audio = { path = "../librespot-fork/audio" }
-librespot-connect = { path = "../librespot-fork/connect" }
-librespot-core = { path = "../librespot-fork/core" }
-librespot-metadata = { path = "../librespot-fork/metadata" }
-librespot-oauth = { path = "../librespot-fork/oauth" }
-librespot-playback = { path = "../librespot-fork/playback" }
-librespot-protocol = { path = "../librespot-fork/protocol" }
+librespot-audio = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
+librespot-connect = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
+librespot-core = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
+librespot-metadata = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
+librespot-oauth = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
+librespot-playback = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
+librespot-protocol = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
