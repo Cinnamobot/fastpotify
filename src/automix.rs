@@ -532,7 +532,7 @@ impl Analysis {
 }
 
 /// Where each deck goes and how far the pair is stretched, for one pair.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Transition {
     /// Seconds into the outgoing track where its fade starts.
     pub fade_out_at: f64,
@@ -558,6 +558,27 @@ pub struct Transition {
     /// migrates from the incoming deck to the outgoing one, and each deck is
     /// at its natural rate exactly when it is loudest.
     pub tempo_ratio: f64,
+    /// The incoming track's half of the sweep, already rendered.
+    ///
+    /// `None` when the probe's audio does not reach the overlap's start, in
+    /// which case the outgoing tail carries the whole stretch on its own.
+    pub curve: Option<std::sync::Arc<librespot_playback::player::IncomingCurve>>,
+}
+
+impl PartialEq for Transition {
+    /// Compares the plan itself, not the audio rendered for it.
+    ///
+    /// [`Self::curve`] is a pure function of the other fields, and it is
+    /// thousands of samples: comparing it would mean walking a buffer to
+    /// learn something the three numbers already say, on a check that runs
+    /// several times a second. Two transitions are the same transition when
+    /// they put the decks in the same place, which is exactly these fields.
+    fn eq(&self, other: &Self) -> bool {
+        self.fade_out_at == other.fade_out_at
+            && self.fade_in_at == other.fade_in_at
+            && self.duration == other.duration
+            && self.tempo_ratio == other.tempo_ratio
+    }
 }
 
 /// The rate each deck plays at, `p` of the way through an overlap.
@@ -594,6 +615,24 @@ pub fn curve_rates(ratio: f64, progress: f64) -> (f64, f64) {
 /// from the same loop that renders, so the steps land exactly where they are
 /// asked for.
 const CURVE_STEP_FRAMES: u64 = 1_024;
+
+/// How many frames of the incoming track an overlap of `frames` consumes.
+///
+/// The deck plays at `ratio^(p-1)` of the track's own tempo, so what the
+/// overlap costs is that rate's integral over the whole sweep. This is where
+/// the decoder has to be resumed from once the overlap is over, and knowing
+/// it in closed form means the render and the hand-over agree by construction
+/// rather than by measurement.
+pub fn curve_frames_consumed(ratio: f64, frames: usize) -> usize {
+    if !(ratio.is_finite() && ratio > 0.0) || frames == 0 {
+        return frames;
+    }
+    if (ratio - 1.0).abs() < 1e-9 {
+        return frames;
+    }
+    let mean = (1.0 - 1.0 / ratio) / ratio.ln();
+    (frames as f64 * mean).round() as usize
+}
 
 /// Renders `frames` of the incoming track under the curve, ready to be mixed.
 ///
@@ -832,6 +871,7 @@ pub fn plan_exit_matched(
             fade_in_at,
             duration,
             tempo_ratio,
+            curve: None,
         });
     }
     None
@@ -1112,6 +1152,31 @@ mod tests {
                 drift as f64 / 44.1
             );
         }
+    }
+
+    /// The hand-over depends on knowing where the overlap left the track, so
+    /// the closed form has to agree with what the render actually walks.
+    #[test]
+    fn the_consumed_frames_match_what_the_render_walks() {
+        let ratio = 1.2652;
+        let frames = 44_100usize * 4;
+        let consumed = curve_frames_consumed(ratio, frames);
+        // The mean of `ratio^(p-1)` over the overlap, which is the same
+        // integral the render is built on.
+        let expected = frames as f64 * (1.0 - 1.0 / ratio) / ratio.ln();
+        assert!(
+            (consumed as f64 - expected).abs() <= 1.0,
+            "the closed form and the sweep disagree: {consumed} vs {expected:.1}"
+        );
+        // It must be a real reduction: a slower deck covers less track than
+        // the overlap lasts, which is the whole reason the seek is needed.
+        assert!(
+            consumed < frames,
+            "a slowed deck cannot cover the whole overlap"
+        );
+        // ...and the other way for a speed-up.
+        assert!(curve_frames_consumed(1.0 / ratio, frames) > frames);
+        assert_eq!(curve_frames_consumed(1.0, frames), frames);
     }
 
     /// Nothing to render must produce nothing, so the caller can fall back

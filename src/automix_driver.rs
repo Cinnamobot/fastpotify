@@ -52,6 +52,9 @@ pub struct Automix {
     incoming_worker: Worker,
     /// The preloaded track's grid, and where its probe began.
     incoming: Option<(Analysis, f64)>,
+    /// The opening of the preloaded track, kept so the overlap's other half
+    /// can be rendered from it.
+    incoming_audio: Arc<Vec<f32>>,
     /// The transition currently handed to the player, so it is only sent
     /// again when it actually changes.
     armed: Option<automix::Transition>,
@@ -78,6 +81,7 @@ impl Automix {
             incoming_from: 0.0,
             incoming_worker: Worker::spawn(sample_rate),
             incoming: None,
+            incoming_audio: Arc::new(Vec::new()),
             armed: None,
             restructured_at: 0,
         })
@@ -89,6 +93,7 @@ impl Automix {
         self.collector.clear();
         self.playing = None;
         self.incoming = None;
+        self.incoming_audio = Arc::new(Vec::new());
         self.armed = None;
     }
 
@@ -130,7 +135,7 @@ impl Automix {
         elapsed: Duration,
         out_duration: Duration,
     ) -> Option<Option<automix::Transition>> {
-        let planned = self.plan(elapsed, out_duration)?;
+        let mut planned = self.plan(elapsed, out_duration)?;
         // Hold the first plan as soon as there is one: it is what tells the
         // player the next track has to be fetched early enough to analyse.
         let lead_in = out_duration
@@ -141,7 +146,9 @@ impl Automix {
             return None;
         }
         match &self.armed {
-            // Already holding this exact plan: nothing to say.
+            // Already holding this exact plan: nothing to say, and nothing to
+            // render. This is the common path — it runs several times a
+            // second — so the render below must not be reachable from here.
             Some(armed) if *armed == planned => return None,
             Some(armed) => {
                 if armed.tempo_ratio != planned.tempo_ratio {
@@ -158,7 +165,8 @@ impl Automix {
             }
             None => {}
         }
-        self.armed = Some(planned);
+        planned.curve = self.render_curve_for(&planned);
+        self.armed = Some(planned.clone());
         Some(Some(planned))
     }
 
@@ -185,6 +193,10 @@ impl Automix {
         );
         self.incoming = None;
         self.incoming_from = probe.position_seconds;
+        // Kept, not just measured: the overlap's other half has to be
+        // rendered from the track's own audio, and this probe is the only
+        // copy of it that exists before the track starts.
+        self.incoming_audio = Arc::new(probe.samples.clone());
         // The probe's own audio is all there is of the incoming track, so
         // its envelope is measured from it directly rather than collected
         // from the sink the way the playing track's is.
@@ -312,6 +324,12 @@ impl Automix {
     ///
     /// `elapsed` is how far into the playing track the player is, and
     /// `out_duration` is the whole track's length.
+    ///
+    /// The returned transition carries the incoming track's half of the tempo
+    /// sweep, rendered from the probe's own audio. It is rendered here rather
+    /// than played live because the live path cannot feed a swept deck
+    /// without either starving it or reading the track ahead of what has been
+    /// heard; see [`automix::render_curve`].
     pub fn plan(&mut self, elapsed: Duration, out_duration: Duration) -> Option<automix::Transition> {
         // Resolve the incoming grid here, so a probe that finished while the
         // outgoing track was still playing is picked up before it is needed.
@@ -322,7 +340,60 @@ impl Automix {
         // the playing grid is: without it the incoming bars are read as if
         // the track began at the probe.
         let incoming = incoming.map(|to| to.anchored_at(self.incoming_from));
-        automix::plan_exit_matched(&anchored, incoming.as_ref(), out_duration, elapsed.as_secs_f64())
+        automix::plan_exit_matched(
+            &anchored,
+            incoming.as_ref(),
+            out_duration,
+            elapsed.as_secs_f64(),
+        )
+    }
+
+    /// Attaches the incoming track's rendered half to a plan, if it needs one.
+    ///
+    /// Called only when the plan has actually changed. The render is seconds
+    /// of audio through the keylock engine, and `take_plan_change` runs on
+    /// every position update — several times a second — so doing this on each
+    /// call re-rendered the same overlap over and over and starved the sink.
+    /// The plan's own three numbers decide whether anything needs rendering,
+    /// which is why they are compared without the curve.
+    fn render_curve_for(&self, planned: &automix::Transition) -> Option<Arc<librespot_playback::player::IncomingCurve>> {
+        if planned.tempo_ratio == 1.0 {
+            return None;
+        }
+        let channels = crate::vis::CHANNELS as usize;
+        let rate = crate::vis::SAMPLE_RATE;
+        let from_ms = (planned.fade_in_at.max(0.0) * 1000.0) as usize;
+        let from = from_ms * rate as usize / 1000 * channels;
+        if from >= self.incoming_audio.len() {
+            // The overlap starts past everything the probe heard. The opening
+            // is a fixed window and a boundary can be planned ahead of a
+            // chorus well beyond it, so this is expected rather than a fault:
+            // the tail carries the whole stretch instead.
+            return None;
+        }
+        let frames = (planned.duration.as_secs_f64() * f64::from(rate)) as usize;
+        let rendered = automix::render_curve(
+            &self.incoming_audio[from..],
+            planned.tempo_ratio,
+            frames,
+            channels,
+            rate,
+        );
+        if rendered.is_empty() {
+            log::debug!("automix: the curve did not render, so the tail carries the whole stretch");
+            return None;
+        }
+        let consumed = automix::curve_frames_consumed(planned.tempo_ratio, frames);
+        log::debug!(
+            "automix: rendered {:.2}s of the incoming track for the overlap, covering {:.2}s of it",
+            frames as f64 / f64::from(rate),
+            consumed as f64 / f64::from(rate)
+        );
+        Some(Arc::new(librespot_playback::player::IncomingCurve {
+            samples: Arc::new(rendered),
+            consumed_ms: (consumed as u64 * 1_000 / u64::from(rate)) as u32,
+            ratio: planned.tempo_ratio,
+        }))
     }
 }
 
@@ -460,6 +531,49 @@ mod tests {
             "the ratio left the band the decks can share: {}",
             planned.tempo_ratio
         );
+    }
+
+    /// The plan's own numbers decide whether anything needs rendering. The
+    /// check runs several times a second and a render is seconds of audio
+    /// through the keylock engine, so rendering on every call re-rendered the
+    /// same overlap over and over and starved the sink — which a live run
+    /// showed as dropped audio.
+    #[test]
+    fn a_plan_is_the_same_plan_with_its_curve_attached() {
+        let ratio = 1.2652;
+        let plan = automix::Transition {
+            fade_out_at: 120.0,
+            fade_in_at: 4.0,
+            duration: Duration::from_secs(8),
+            tempo_ratio: ratio,
+            curve: None,
+        };
+        // The rendered audio must not be part of the comparison: walking a
+        // buffer to learn what three numbers already say would put the cost
+        // back on every tick.
+        let rendered = automix::Transition {
+            curve: Some(Arc::new(librespot_playback::player::IncomingCurve {
+                samples: Arc::new(vec![0.0; 8]),
+                consumed_ms: 7_000,
+                ratio,
+            })),
+            ..plan.clone()
+        };
+        assert_eq!(
+            plan, rendered,
+            "attaching the curve must not make it a different plan"
+        );
+
+        let moved = automix::Transition {
+            fade_out_at: 121.0,
+            ..plan.clone()
+        };
+        assert_ne!(plan, moved, "a moved exit is a different plan");
+        let restretched = automix::Transition {
+            tempo_ratio: 1.1,
+            ..plan.clone()
+        };
+        assert_ne!(plan, restretched, "a different ratio is a different plan");
     }
 
     /// The bug this covers: a plan was armed long before the boundary, at a

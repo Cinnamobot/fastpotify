@@ -834,15 +834,17 @@ fn drive_automix(
     };
     let plan = planned.map(|planned| {
         log::debug!(
-            "automix: arming a {:.2}s transition, exiting at {:.2}s, starting the next at {:.2}s, tail at {:.4}x{}",
+            "automix: arming a {:.2}s transition, exiting at {:.2}s, starting the next at {:.2}s, tail at {:.4}x, stretch {}",
             planned.duration.as_secs_f64(),
             planned.fade_out_at,
             planned.fade_in_at,
             planned.tempo_ratio,
-            if planned.tempo_ratio == 1.0 {
-                " (no incoming grid, so nothing is matched)"
+            if planned.curve.is_some() {
+                "shared by both decks"
+            } else if planned.tempo_ratio == 1.0 {
+                "none (no incoming grid)"
             } else {
-                ""
+                "carried by the tail alone"
             }
         );
         librespot_playback::player::CrossfadePlan {
@@ -851,6 +853,7 @@ fn drive_automix(
                 .saturating_sub(Duration::from_secs_f64(planned.fade_out_at)),
             fade_in_at: Duration::from_secs_f64(planned.fade_in_at),
             tempo_rate: planned.tempo_ratio,
+            curve: planned.curve,
         }
     });
     player.set_crossfade_plan(plan);
