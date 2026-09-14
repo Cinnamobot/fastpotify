@@ -221,8 +221,18 @@ impl Analysis {
     }
 
     /// Where the track's choruses are, in track time.
-    pub fn loud_sections(&self) -> &[LoudSection] {
-        &self.loud_sections
+    ///
+    /// The readings are taken in the audio's own time and only later
+    /// anchored, so the offset is applied here rather than being frozen in
+    /// at detection time.
+    pub fn loud_sections(&self) -> Vec<LoudSection> {
+        self.loud_sections
+            .iter()
+            .map(|section| LoudSection {
+                start: self.offset_in_track + section.start,
+                end: self.offset_in_track + section.end,
+            })
+            .collect()
     }
 
     /// The last chorus that has already finished by `now`, if there is one.
@@ -230,11 +240,10 @@ impl Analysis {
     /// A transition leaves just after a chorus rather than in the middle of
     /// one, so the caller wants the end of the latest section that is over.
     pub fn chorus_ended_by(&self, now: f64) -> Option<LoudSection> {
-        self.loud_sections
-            .iter()
+        self.loud_sections()
+            .into_iter()
             .filter(|section| section.end <= now)
             .next_back()
-            .copied()
     }
 
     /// The first chorus that starts at or after `from`.
@@ -242,10 +251,9 @@ impl Analysis {
     /// The incoming track is brought in ahead of this, so its chorus lands
     /// after the overlap rather than inside it.
     pub fn chorus_starting_after(&self, from: f64) -> Option<LoudSection> {
-        self.loud_sections
-            .iter()
+        self.loud_sections()
+            .into_iter()
             .find(|section| section.start >= from)
-            .copied()
     }
 
     /// Finds the stretches that stand out by band balance rather than level.
@@ -282,7 +290,11 @@ impl Analysis {
         // Walk the curve and keep the runs above the threshold, dropping
         // ones too short to be a section. Level is not consulted at all:
         // this is about balance, so a quiet chorus still counts.
-        let offset = self.offset_in_track;
+        //
+        // The sections are recorded in the audio's own time, not the
+        // track's: the reading is made before the caller says where in the
+        // track that audio came from, so baking the offset in here would
+        // freeze it at zero and every later anchor would be ignored.
         let mut sections = Vec::new();
         let mut run: Option<usize> = None;
         for index in 0..=smoothed.len() {
@@ -293,8 +305,8 @@ impl Analysis {
                     let seconds = (index - start) as f64 * hop;
                     if seconds >= MIN_LOUD_SECONDS {
                         sections.push(LoudSection {
-                            start: offset + start as f64 * hop,
-                            end: offset + index as f64 * hop,
+                            start: start as f64 * hop,
+                            end: index as f64 * hop,
                         });
                     }
                     run = None;
@@ -1054,6 +1066,53 @@ mod tests {
             analysis.loud_sections().is_empty(),
             "expected no chorus, got {:?}",
             analysis.loud_sections()
+        );
+    }
+
+    /// The bug this covers: the section times were recorded with the
+    /// analysis offset baked in at detection time. Detection happens before
+    /// the caller says where in the track the audio came from, so the offset
+    /// was always zero when it was written, and every later anchor was
+    /// ignored — a track started a third of the way in reported its choruses
+    /// in the wrong place.
+    #[test]
+    fn an_anchored_track_reports_its_choruses_where_they_play() {
+        let bands = band_envelope(&[
+            ("intro", 10.0),
+            ("verse", 18.0),
+            ("chorus", 20.0),
+            ("verse", 18.0),
+            ("chorus", 20.0),
+            ("outro", 12.0),
+        ]);
+        let grid = click_track(128.0, 30.0, 44_100);
+        let base = Analysis::of(&grid, 44_100).expect("a grid");
+        let mut analysis = base.clone();
+        analysis.refresh_bands(&bands);
+
+        // Read from the top: the first chorus sits at 28s of audio.
+        let from_start = analysis.loud_sections();
+        assert_eq!(from_start.len(), 2);
+        assert!(
+            (from_start[0].start - 28.0).abs() < 4.0,
+            "the first chorus should be near 28s, got {:.1}s",
+            from_start[0].start
+        );
+
+        // The same audio, but the track was started 60s in: every section
+        // moves with it, because the readings are anchored to where the
+        // audio came from rather than to where the analysis began.
+        let anchored = analysis.anchored_at(60.0);
+        let shifted = anchored.loud_sections();
+        assert_eq!(shifted.len(), 2);
+        assert!(
+            (shifted[0].start - 88.0).abs() < 4.0,
+            "anchored 60s in, the first chorus should be near 88s, got {:.1}s",
+            shifted[0].start
+        );
+        assert!(
+            (anchored.chorus_starting_after(80.0).expect("a chorus").start - 88.0).abs() < 4.0,
+            "the accessors must report anchored times too"
         );
     }
 
