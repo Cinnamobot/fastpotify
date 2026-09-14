@@ -96,6 +96,20 @@ impl Analysis {
         Some(analysis)
     }
 
+    /// Seconds into the track the analysed audio reaches, or `None` when no
+    /// loudness profile was measured.
+    ///
+    /// Automix hears a window of the track rather than the whole of it, and
+    /// this is how far that window got. Anything the planner wants to say
+    /// about the track's structure — where its chorus is — only holds for
+    /// the part that was actually heard.
+    pub fn analysed_until(&self) -> Option<f64> {
+        if self.bar_loudness.is_empty() {
+            return None;
+        }
+        Some(self.offset_in_track + self.bar_loudness.len() as f64 * self.bar_seconds())
+    }
+
     /// The loudness profile of the audio this analysis came from.
     pub fn bar_loudness(&self) -> &[f64] {
         &self.bar_loudness
@@ -345,6 +359,17 @@ pub fn plan_exit_matched(
         Some(to) => {
             let ratio = fold_octave(to.bpm / from.bpm);
             if (ratio - 1.0).abs() > MAX_TEMPO_DIFF {
+                // Said out loud because the consequence is that no transition
+                // is planned at all, and the boundary keeps the player's own
+                // crossfade: without this the log shows nothing but a
+                // crossfade that was never armed.
+                log::debug!(
+                    "automix: refusing {:.1} against {:.1} BPM, {ratio:.3}x is past the \
+                     {:.0}% stretch limit",
+                    from.bpm,
+                    to.bpm,
+                    MAX_TEMPO_DIFF * 100.0
+                );
                 return None;
             }
             ratio
@@ -377,8 +402,15 @@ pub fn plan_exit_matched(
         // Where the chorus is, if the profile is deep enough to say. The
         // span's exit is used, and it has to leave a bar of music after it
         // so the overlap is not simply the track ending.
+        // The loudest span is the loudest part of the audio that was
+        // analysed, not of the track. Taking it as the exit is only sound
+        // when the analysis reached the end: a window that stopped early
+        // cannot see a later section, so a mid-track chorus would be mistaken
+        // for the last one and everything after it would be cut away.
         let chorus_exit = from
-            .loudest_span(from.bar_loudness(), bars as usize)
+            .analysed_until()
+            .filter(|until| *until + slack >= end_of_track)
+            .and_then(|_| from.loudest_span(from.bar_loudness(), bars as usize))
             .filter(|exit| *exit + seconds + slack <= end_of_track)
             .filter(|exit| *exit >= earliest);
 
@@ -464,6 +496,25 @@ mod tests {
                 }
             }
             t += beat;
+        }
+        samples
+    }
+
+    /// Clicks at `bpm`, with the span between `loud_from` and `loud_to`
+    /// seconds several times louder, as a chorus is in a real track.
+    fn click_track_with_chorus(
+        bpm: f64,
+        seconds: f64,
+        rate: u32,
+        loud_from: f64,
+        loud_to: f64,
+    ) -> Vec<f32> {
+        let mut samples = click_track(bpm, seconds, rate);
+        let channels = crate::vis::CHANNELS as usize;
+        let from = (loud_from * f64::from(rate)) as usize * channels;
+        let to = ((loud_to * f64::from(rate)) as usize * channels).min(samples.len());
+        for sample in &mut samples[from..to] {
+            *sample *= 6.0;
         }
         samples
     }
@@ -657,6 +708,47 @@ mod tests {
         let planned = plan_exit_matched(&a, None, Duration::from_secs(300), 100.0)
             .expect("a track with room ahead still plans");
         assert!(planned.fade_out_at >= 100.0);
+    }
+
+    /// The bug that cut the end off a real track: analysis hears a window,
+    /// so `loudest_span` reports the loudest part *of that window*. On a
+    /// track 281s long whose first 30s were analysed, the chorus it found was
+    /// around 235s, and treating that as the track's final chorus threw away
+    /// the last 46 seconds.
+    ///
+    /// The structure is only trustworthy where it was measured, so a window
+    /// that stopped early must not decide where the track ends.
+    #[test]
+    fn an_early_chorus_does_not_cut_the_end_off_a_long_track() {
+        // A track 300s long, of which only the opening 60s was analysed —
+        // with a clearly loud chorus inside that opening.
+        let a = Analysis::of(
+            &click_track_with_chorus(128.0, 60.0, 44_100, 16.0, 32.0),
+            44_100,
+        )
+        .unwrap();
+        let out = Duration::from_secs(300);
+        let planned = plan_exit_matched(&a, None, out, 0.0).expect("a plan");
+
+        // Whatever it picks, the fade must run to the end of the track: the
+        // planner has no evidence about anything after the window it heard,
+        // so it must fall back to the outro rather than the mid-window chorus.
+        // Two bars of slack: one for a slow decode, one because the exit is
+        // snapped back to a downbeat at or before the latest safe start.
+        let slack = 2.0 * a.bar_seconds();
+        let tail = out.as_secs_f64() - (planned.fade_out_at + planned.duration.as_secs_f64());
+        assert!(
+            tail <= slack + 1e-6,
+            "planned an exit at {:.2}s leaving {tail:.2}s of the track unplayed",
+            planned.fade_out_at
+        );
+        // The old behaviour put the exit at the mid-window chorus. The
+        // fallback is the outro, which this pins.
+        assert!(
+            planned.fade_out_at > 280.0,
+            "the exit fell back to {:.2}s, not the end of the track",
+            planned.fade_out_at
+        );
     }
 
     #[test]

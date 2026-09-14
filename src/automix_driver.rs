@@ -17,6 +17,10 @@ use std::time::Duration;
 use crate::automix::{self, Analysis};
 use crate::automix_track::{Collector, Worker};
 
+/// How long before a transition's own lead-in the plan is armed, so a slow
+/// decode or a late probe still has time to change the decision.
+const PLAN_SLACK: Duration = Duration::from_secs(5);
+
 /// Plans and arms transitions for one engine.
 ///
 /// One per engine: it holds the worker thread doing the analysis, and the
@@ -36,6 +40,9 @@ pub struct Automix {
     incoming_worker: Worker,
     /// The preloaded track's grid, and where its probe began.
     incoming: Option<(Analysis, f64)>,
+    /// The transition currently handed to the player, so it is only sent
+    /// again when it actually changes.
+    armed: Option<automix::Transition>,
 }
 
 impl std::fmt::Debug for Automix {
@@ -56,6 +63,7 @@ impl Automix {
             incoming_from: 0.0,
             incoming_worker: Worker::spawn(sample_rate),
             incoming: None,
+            armed: None,
         })
     }
 
@@ -65,6 +73,7 @@ impl Automix {
         self.collector.clear();
         self.playing = None;
         self.incoming = None;
+        self.armed = None;
     }
 
     /// Called after a seek. The track is unchanged, so a finished grid still
@@ -73,6 +82,39 @@ impl Automix {
     pub fn seeked(&mut self) {
         self.collector.clear();
         self.collected_from = 0.0;
+    }
+
+    /// The transition to hand the player for the coming boundary, or `None`
+    /// when the boundary should keep the player's own crossfade.
+    ///
+    /// Until this returns `Some`, the player's plain crossfade governs, so
+    /// this must also be able to take a transition back: a plan armed before
+    /// the incoming track's grid was ready has no tempo to match, and a
+    /// stale one would fire with the wrong ratio long after the probe has
+    /// produced a better answer.
+    pub fn take_plan_change(
+        &mut self,
+        elapsed: Duration,
+        out_duration: Duration,
+    ) -> Option<Option<automix::Transition>> {
+        // Wait until the boundary is close before deciding. This is also
+        // what gives the probe time to land: it is taken when the track is
+        // preloaded, which happens nearer the boundary than the arming used
+        // to fire, and a plan made without it has no tempo to match.
+        let planned = self.plan(elapsed, out_duration).filter(|transition| {
+            // The player fires when the track has less left than the later of
+            // the two lead-ins, so this is the moment the plan must be in its
+            // hands by.
+            let lead_in = out_duration
+                .saturating_sub(Duration::from_secs_f64(transition.fade_out_at))
+                .max(transition.duration);
+            out_duration.saturating_sub(elapsed) <= lead_in + PLAN_SLACK
+        });
+        if planned == self.armed {
+            return None;
+        }
+        self.armed = planned;
+        Some(planned)
     }
 
     /// Receives the opening of the track being preloaded, so the transition
@@ -282,6 +324,68 @@ mod tests {
                 .plan(Duration::from_secs(0), Duration::from_secs(240))
                 .is_none(),
             "an unmixable pair must not be armed"
+        );
+    }
+
+    /// The bug this covers: a plan was armed long before the boundary, at a
+    /// time when the incoming track was not yet preloaded and so had no
+    /// grid. The plan then carried a tempo ratio of 1.0 — no matching at all
+    /// — and nothing ever replaced it, because arming happened once and the
+    /// probe landed afterwards.
+    ///
+    /// The decision has to be made late enough that the probe's answer is in,
+    /// and a plan that is no longer wanted has to be withdrawn.
+    #[test]
+    fn nothing_is_armed_before_the_boundary_is_imminent() {
+        let collector = Collector::new(44_100);
+        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
+        automix.playing = Some(
+            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
+        );
+
+        // Far from the boundary: nothing is armed, so the player's own
+        // crossfade governs and no stale ratio can be left behind.
+        assert!(
+            automix
+                .take_plan_change(Duration::from_secs(0), Duration::from_secs(240))
+                .is_none(),
+            "nothing should have changed this far out"
+        );
+
+        // Close to the boundary it arms, and reports the change once.
+        let near = Duration::from_millis(240_000 - 8_000);
+        let change = automix.take_plan_change(near, Duration::from_secs(240));
+        assert!(
+            matches!(change, Some(Some(_))),
+            "a transition should arm near the boundary, got {change:?}"
+        );
+        assert!(
+            automix
+                .take_plan_change(near, Duration::from_secs(240))
+                .is_none(),
+            "an unchanged plan must not be re-sent"
+        );
+    }
+
+    /// A plan that stops being wanted must be taken back, or the player keeps
+    /// firing a transition nobody chose.
+    #[test]
+    fn a_plan_can_be_withdrawn() {
+        let collector = Collector::new(44_100);
+        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100).expect("on");
+        automix.playing = Some(
+            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
+        );
+        let near = Duration::from_millis(240_000 - 8_000);
+        assert!(matches!(
+            automix.take_plan_change(near, Duration::from_secs(240)),
+            Some(Some(_))
+        ));
+        // The track turns out to have no room after all.
+        assert_eq!(
+            automix.take_plan_change(near, Duration::from_secs(2)),
+            Some(None),
+            "the withdrawn plan must reach the player"
         );
     }
 

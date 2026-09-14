@@ -789,33 +789,29 @@ fn drive_automix(
             track.duration_ms,
         )
     };
+    let out_duration = Duration::from_millis(u64::from(duration_ms));
     automix.tick(crate::vis::SAMPLE_RATE, elapsed);
-    let Some(planned) = automix.plan(elapsed, Duration::from_millis(u64::from(duration_ms))) else {
+    // `None` means nothing changed; `Some(None)` withdraws a plan that is no
+    // longer wanted, and `Some(Some(..))` arms one.
+    let Some(planned) = automix.take_plan_change(elapsed, out_duration) else {
         return;
     };
-    let remaining = Duration::from_millis(u64::from(duration_ms)).saturating_sub(elapsed);
-    // Arm it only as the boundary comes into view. The plan's own lead-in
-    // decides when the crossfade fires, so arming early is harmless, but
-    // re-arming on every position update is not.
-    if remaining > planned.duration + Duration::from_secs(30) {
-        return;
-    }
-    log::debug!(
-        "automix: arming a {:.2}s transition, exiting at {:.2}s (remaining {:.1}s)",
-        planned.duration.as_secs_f64(),
-        planned.fade_out_at,
-        remaining.as_secs_f64()
-    );
-    let fade_out_before_end =
-        Duration::from_millis(u64::from(duration_ms)).saturating_sub(Duration::from_secs_f64(
+    let plan = planned.map(|planned| {
+        log::debug!(
+            "automix: arming a {:.2}s transition, exiting at {:.2}s, tail at {:.4}x",
+            planned.duration.as_secs_f64(),
             planned.fade_out_at,
-        ));
-    player.set_crossfade_plan(Some(librespot_playback::player::CrossfadePlan {
-        duration: planned.duration,
-        fade_out_before_end,
-        fade_in_at: Duration::from_secs_f64(planned.fade_in_at),
-        tempo_rate: planned.tempo_ratio,
-    }));
+            planned.tempo_ratio
+        );
+        librespot_playback::player::CrossfadePlan {
+            duration: planned.duration,
+            fade_out_before_end: out_duration
+                .saturating_sub(Duration::from_secs_f64(planned.fade_out_at)),
+            fade_in_at: Duration::from_secs_f64(planned.fade_in_at),
+            tempo_rate: planned.tempo_ratio,
+        }
+    });
+    player.set_crossfade_plan(plan);
 }
 
 fn set<T: PartialEq>(target: &mut T, value: T) -> bool {
