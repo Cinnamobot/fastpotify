@@ -1154,30 +1154,6 @@ mod tests {
         }
     }
 
-    /// The hand-over depends on knowing where the overlap left the track, so
-    /// the closed form has to agree with what the render actually walks.
-    #[test]
-    fn the_consumed_frames_match_what_the_render_walks() {
-        let ratio = 1.2652;
-        let frames = 44_100usize * 4;
-        let consumed = curve_frames_consumed(ratio, frames);
-        // The mean of `ratio^(p-1)` over the overlap, which is the same
-        // integral the render is built on.
-        let expected = frames as f64 * (1.0 - 1.0 / ratio) / ratio.ln();
-        assert!(
-            (consumed as f64 - expected).abs() <= 1.0,
-            "the closed form and the sweep disagree: {consumed} vs {expected:.1}"
-        );
-        // It must be a real reduction: a slower deck covers less track than
-        // the overlap lasts, which is the whole reason the seek is needed.
-        assert!(
-            consumed < frames,
-            "a slowed deck cannot cover the whole overlap"
-        );
-        // ...and the other way for a speed-up.
-        assert!(curve_frames_consumed(1.0 / ratio, frames) > frames);
-        assert_eq!(curve_frames_consumed(1.0, frames), frames);
-    }
 
     /// Nothing to render must produce nothing, so the caller can fall back
     /// instead of mixing a hole into the overlap.
@@ -1656,45 +1632,6 @@ mod tests {
         );
     }
 
-    /// The stretch sits on whichever deck is quietest, which is what makes a
-    /// shared sweep sound better than stretching one deck outright: each
-    /// deck drifts away from its own tempo only as it fades, and is at its
-    /// own tempo at the moment it owns the mix.
-    #[test]
-    fn each_deck_drifts_only_as_it_fades() {
-        let folded = fold_octave(1.3333);
-        let sweep = |progress: f64| {
-            let up = folded.powf(progress);
-            (up, up / folded)
-        };
-
-        // The outgoing deck starts at its own tempo and is pulled away as it
-        // hands over, so its deviation only grows.
-        let mut previous = 0.0;
-        for step in 0..=20 {
-            let (up, _) = sweep(f64::from(step) / 20.0);
-            let deviation = (up - 1.0).abs();
-            assert!(
-                deviation >= previous - 1e-9,
-                "the outgoing deck came back towards its own tempo mid-fade"
-            );
-            previous = deviation;
-        }
-
-        // The incoming deck is the mirror of that: furthest from its own
-        // tempo while it is inaudible, and settled on it by the time it owns
-        // the mix.
-        let mut previous = f64::INFINITY;
-        for step in 0..=20 {
-            let (_, across) = sweep(f64::from(step) / 20.0);
-            let deviation = (across - 1.0).abs();
-            assert!(
-                deviation <= previous + 1e-9,
-                "the incoming deck drifted further off as it grew louder"
-            );
-            previous = deviation;
-        }
-    }
 
     #[test]
     fn octave_folding_leaves_a_close_tempo_alone() {

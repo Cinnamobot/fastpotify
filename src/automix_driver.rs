@@ -356,13 +356,17 @@ impl Automix {
     /// call re-rendered the same overlap over and over and starved the sink.
     /// The plan's own three numbers decide whether anything needs rendering,
     /// which is why they are compared without the curve.
-    fn render_curve_for(&self, planned: &automix::Transition) -> Option<Arc<librespot_playback::player::IncomingCurve>> {
+    fn render_curve_for(
+        &mut self,
+        planned: &automix::Transition,
+    ) -> Option<Arc<librespot_playback::player::IncomingCurve>> {
         if planned.tempo_ratio == 1.0 {
             return None;
         }
         let channels = crate::vis::CHANNELS as usize;
         let rate = crate::vis::SAMPLE_RATE;
         let from_ms = (planned.fade_in_at.max(0.0) * 1000.0) as usize;
+        let frames = (planned.duration.as_secs_f64() * f64::from(rate)) as usize;
         let from = from_ms * rate as usize / 1000 * channels;
         if from >= self.incoming_audio.len() {
             // The overlap starts past everything the probe heard. The opening
@@ -371,7 +375,6 @@ impl Automix {
             // the tail carries the whole stretch instead.
             return None;
         }
-        let frames = (planned.duration.as_secs_f64() * f64::from(rate)) as usize;
         let rendered = automix::render_curve(
             &self.incoming_audio[from..],
             planned.tempo_ratio,
