@@ -3198,7 +3198,7 @@ dependencies = [
 [[package]]
 name = "librespot-audio"
 version = "0.8.0"
-source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#86cc9b28660ddb398f261e80d8b44677d4d13ab0"
+source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#77d99f0f6d3427c2f68247fd1a09e2913e424469"
 dependencies = [
  "aes 0.8.4",
  "bytes",
@@ -3217,7 +3217,7 @@ dependencies = [
 [[package]]
 name = "librespot-connect"
 version = "0.8.0"
-source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#86cc9b28660ddb398f261e80d8b44677d4d13ab0"
+source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#77d99f0f6d3427c2f68247fd1a09e2913e424469"
 dependencies = [
  "futures-util",
  "librespot-core",
@@ -3236,7 +3236,7 @@ dependencies = [
 [[package]]
 name = "librespot-core"
 version = "0.8.0"
-source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#86cc9b28660ddb398f261e80d8b44677d4d13ab0"
+source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#77d99f0f6d3427c2f68247fd1a09e2913e424469"
 dependencies = [
  "aes 0.8.4",
  "base64",
@@ -3292,7 +3292,7 @@ dependencies = [
 [[package]]
 name = "librespot-metadata"
 version = "0.8.0"
-source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#86cc9b28660ddb398f261e80d8b44677d4d13ab0"
+source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#77d99f0f6d3427c2f68247fd1a09e2913e424469"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3309,7 +3309,7 @@ dependencies = [
 [[package]]
 name = "librespot-oauth"
 version = "0.8.0"
-source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#86cc9b28660ddb398f261e80d8b44677d4d13ab0"
+source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#77d99f0f6d3427c2f68247fd1a09e2913e424469"
 dependencies = [
  "log",
  "oauth2",
@@ -3322,7 +3322,7 @@ dependencies = [
 [[package]]
 name = "librespot-playback"
 version = "0.8.0"
-source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#86cc9b28660ddb398f261e80d8b44677d4d13ab0"
+source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#77d99f0f6d3427c2f68247fd1a09e2913e424469"
 dependencies = [
  "cpal",
  "form_urlencoded",
@@ -3348,7 +3348,7 @@ dependencies = [
 [[package]]
 name = "librespot-protocol"
 version = "0.8.0"
-source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#86cc9b28660ddb398f261e80d8b44677d4d13ab0"
+source = "git+https://github.com/Cinnamobot/librespot?branch=fastpotify-automix#77d99f0f6d3427c2f68247fd1a09e2913e424469"
 dependencies = [
  "protobuf",
  "protobuf-codegen",

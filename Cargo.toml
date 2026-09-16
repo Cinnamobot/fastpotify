@@ -195,12 +195,17 @@ opt-level = 0
 # explicit CMAKE_GENERATOR win. Drop when upstream takes the change.
 [patch.crates-io]
 projectm-sys = { git = "https://github.com/crmne/projectm-rs", branch = "respect-cmake-generator" }
-# librespot 0.8.0 plus the small patches Fastpotify needs: queue controls,
-# normalisation-factor reporting for the visualisers, and a distinct event
-# when Spotify refuses an audio key, and a connection deadline that includes
-# socket setup, plus an in-memory credential cache for platform storage.
-# Every librespot crate comes from the
-# fork so one copy exists. Drop patches as upstream takes them.
+# librespot 0.8.0 plus what Fastpotify needs of it. The small patches are
+# queue controls, normalisation-factor reporting for the visualisers, a
+# distinct event when Spotify refuses an audio key, a connection deadline
+# that includes socket setup, and an in-memory credential cache for platform
+# storage. The large one is the crossfade machinery automix drives: a plan
+# that names the track it leads into, an event that raises the next track as
+# soon as the queue knows one rather than when the preload needs it, a probe
+# that steps only over bytes already fetched, and a preload ask the player
+# repeats while the queue has nothing to give it.
+# Every librespot crate comes from the fork so one copy exists. Drop patches
+# as upstream takes them.
 librespot-audio = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
 librespot-connect = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
 librespot-core = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
