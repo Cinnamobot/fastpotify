@@ -11,6 +11,7 @@
 //! [`Collector::push`], which only appends to a bounded buffer; the
 //! beat tracker runs on a worker thread once the track has been collected.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -47,7 +48,11 @@ pub const BAND_EDGES: [f64; NUM_BANDS - 1] = [250.0, 4000.0];
 /// A single pole is deliberate: the point is a coarse balance between
 /// bands over seconds of audio, not a clean crossover, and a one-pole costs
 /// two multiplies per sample so it can run inside the sink's push.
-#[derive(Debug, Clone, Copy, Default)]
+///
+/// There is no `Default`: a zero coefficient passes nothing, which reads as
+/// an empty band rather than a silent one, so a filter must be built for a
+/// cutoff.
+#[derive(Debug, Clone, Copy)]
 struct OnePole {
     state: f64,
     coefficient: f64,
@@ -66,6 +71,11 @@ impl OnePole {
     fn run(&mut self, input: f64) -> f64 {
         self.state += self.coefficient * (input - self.state);
         self.state
+    }
+
+    /// Forgets the signal it has seen, keeping the cutoff it was built for.
+    fn reset(&mut self) {
+        self.state = 0.0;
     }
 }
 
@@ -108,10 +118,7 @@ impl Envelope {
         let hop_samples = (ENERGY_HOP_SECONDS * f64::from(sample_rate)) as usize
             * crate::vis::CHANNELS as usize;
         let rate = f64::from(sample_rate);
-        let mut split = [OnePole::default(); NUM_BANDS - 1];
-        for (filter, edge) in split.iter_mut().zip(BAND_EDGES) {
-            *filter = OnePole::new(edge, rate);
-        }
+        let split = std::array::from_fn(|index| OnePole::new(BAND_EDGES[index], rate));
         let max_values = (ENERGY_MAX_SECONDS / ENERGY_HOP_SECONDS) as usize;
         Self {
             values: Vec::new(),
@@ -200,7 +207,7 @@ impl Envelope {
             band.clear();
         }
         for filter in &mut self.split {
-            *filter = OnePole::default();
+            filter.reset();
         }
     }
 }
@@ -353,14 +360,26 @@ impl Collector {
 /// Runs the tracker for one track off the audio path.
 ///
 /// Dropping the handle stops the worker. The most recent request wins: a
-/// track skipped before its analysis finished does not publish a result.
+/// track skipped before its analysis finished does not publish a result, and
+/// a result for a track the owner has since reset away from is discarded
+/// rather than published.
 pub struct Worker {
     request: Mutex<Option<Sender<Job>>>,
     result: Arc<Mutex<Option<Analysis>>>,
+    /// Bumped by [`Worker::reset`]. A job carries the generation it was
+    /// queued under, and a result is published only if that is still current,
+    /// so a run that started for the previous track cannot publish over this
+    /// one. Clearing the slot alone would not do it: the analysis thread may
+    /// be part way through that run when the reset lands.
+    generation: Arc<AtomicU64>,
     join: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Work handed to the analysis thread.
+///
+/// Each job carries the generation it was queued under, so a job for a track
+/// the driver has since moved on from cannot publish its result as the
+/// current one.
 enum Job {
     /// Full analysis of a track's opening: the beat grid comes from these
     /// samples, and the structure from the envelope and bands covering them.
@@ -368,6 +387,7 @@ enum Job {
         samples: Vec<f32>,
         envelope: Vec<f64>,
         bands: [Vec<f64>; NUM_BANDS],
+        generation: u64,
     },
     /// Re-read the structure from longer readings, keeping the grid that was
     /// already tracked. Much cheaper than another beat-tracking pass, which
@@ -375,7 +395,17 @@ enum Job {
     Restructure {
         envelope: Vec<f64>,
         bands: [Vec<f64>; NUM_BANDS],
+        generation: u64,
     },
+}
+
+impl Job {
+    /// The generation this job was queued under.
+    fn generation(&self) -> u64 {
+        match self {
+            Job::Analyse { generation, .. } | Job::Restructure { generation, .. } => *generation,
+        }
+    }
 }
 
 impl std::fmt::Debug for Worker {
@@ -388,7 +418,9 @@ impl Worker {
     pub fn spawn(sample_rate: u32) -> Self {
         let (tx, rx): (Sender<Job>, Receiver<Job>) = std::sync::mpsc::channel();
         let result = Arc::new(Mutex::new(None));
+        let generation = Arc::new(AtomicU64::new(0));
         let published = Arc::clone(&result);
+        let current = Arc::clone(&generation);
         let join = std::thread::Builder::new()
             .name("automix-analysis".into())
             .spawn(move || {
@@ -403,32 +435,50 @@ impl Worker {
                             (job, _) => job,
                         };
                     }
+                    // The generation this job was queued under. A reset in the
+                    // meantime means it describes a track nobody is collecting
+                    // for any more, so it is dropped rather than published.
+                    let asked_under = job.generation();
+                    if asked_under != current.load(Ordering::Acquire) {
+                        continue;
+                    }
+                    // The lock is taken only to read or write the result, never
+                    // across the analysis itself: this thread holds the same
+                    // mutex `latest` takes, and the driver calls that several
+                    // times a second.
                     let analysed = match job {
                         Job::Analyse {
                             samples,
                             envelope,
                             bands,
-                        } => Analysis::of_with_envelope(&samples, sample_rate, &envelope)
-                            .map(|mut analysis| {
+                            ..
+                        } => Analysis::of_with_envelope(&samples, sample_rate, &envelope).map(
+                            |mut analysis| {
                                 analysis.refresh_bands(&bands);
                                 analysis
-                            }),
-                        Job::Restructure { envelope, bands } => {
-                            let mut current: Option<Analysis> = published
+                            },
+                        ),
+                        Job::Restructure { envelope, bands, .. } => {
+                            let kept = published
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
                                 .clone();
-                            current.as_mut().map(|analysis| {
+                            kept.map(|mut analysis: Analysis| {
                                 analysis.refresh_structure(&envelope);
                                 analysis.refresh_bands(&bands);
-                                analysis.clone()
+                                analysis
                             })
                         }
                     };
-                    if analysed.is_some() {
-                        *published
+                    if let Some(analysed) = analysed {
+                        // Checked while holding the lock `reset` also takes, so
+                        // a reset cannot slip between the check and the write.
+                        let mut slot = published
                             .lock()
-                            .unwrap_or_else(|poison| poison.into_inner()) = analysed;
+                            .unwrap_or_else(|poison| poison.into_inner());
+                        if asked_under == current.load(Ordering::Acquire) {
+                            *slot = Some(analysed);
+                        }
                     }
                 }
             })
@@ -436,23 +486,44 @@ impl Worker {
         Self {
             request: Mutex::new(Some(tx)),
             result,
+            generation,
             join,
         }
     }
 
     /// Queues a track's opening for full analysis. Cheap: it moves buffers.
     pub fn analyse(&self, samples: Vec<f32>, envelope: Vec<f64>, bands: [Vec<f64>; NUM_BANDS]) {
+        let generation = self.generation.load(Ordering::Acquire);
         self.send(Job::Analyse {
             samples,
             envelope,
             bands,
+            generation,
         });
     }
 
     /// Queues fresh readings so the structure is re-read against the longer
     /// ones, without re-tracking the beat.
     pub fn restructure(&self, envelope: Vec<f64>, bands: [Vec<f64>; NUM_BANDS]) {
-        self.send(Job::Restructure { envelope, bands });
+        let generation = self.generation.load(Ordering::Acquire);
+        self.send(Job::Restructure {
+            envelope,
+            bands,
+            generation,
+        });
+    }
+
+    /// Forgets the published analysis, for a track boundary or a seek.
+    ///
+    /// The generation goes up first, so a run already in flight for the
+    /// previous track is discarded when it finishes rather than published as
+    /// this track's own grid.
+    pub fn reset(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        *self
+            .result
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
     }
 
     fn send(&self, job: Job) {
@@ -509,6 +580,46 @@ mod tests {
         assert!(!collector.snapshot().is_empty());
         collector.clear();
         assert!(collector.snapshot().is_empty());
+    }
+
+    /// A toned signal is used rather than noise: what the bands are asked
+    /// is which side of the split a frequency fell on, and a tone answers
+    /// that unambiguously.
+    #[test]
+    fn a_cleared_envelope_still_splits_its_bands() {
+        let rate = crate::vis::SAMPLE_RATE;
+        const CHANNELS: usize = 2;
+        // A tone far enough below the first edge to live in the low band.
+        let tone = |seconds: f64| -> Vec<f64> {
+            let frames = (seconds * f64::from(rate)) as usize;
+            (0..frames)
+                .flat_map(|index| {
+                    let t = index as f64 / f64::from(rate);
+                    let value = 0.5 * (std::f64::consts::TAU * 100.0 * t).sin();
+                    [value; CHANNELS]
+                })
+                .collect()
+        };
+        let energy = |band: &Vec<f64>| band.iter().sum::<f64>();
+
+        let mut envelope = Envelope::new(rate);
+        envelope.push(&tone(2.0));
+        assert!(
+            energy(&envelope.band_rms()[0]) > energy(&envelope.band_rms()[2]),
+            "a 100 Hz tone should sit in the low band, not the high one"
+        );
+
+        envelope.clear();
+        envelope.push(&tone(2.0));
+        let bands = envelope.band_rms();
+        assert!(
+            energy(&bands[0]) > energy(&bands[2]),
+            "after clearing, a 100 Hz tone should still sit in the low band; \
+             low {:.6} mid {:.6} high {:.6}",
+            energy(&bands[0]),
+            energy(&bands[1]),
+            energy(&bands[2])
+        );
     }
 
     #[test]
@@ -581,5 +692,63 @@ mod tests {
         );
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(worker.latest().is_none());
+    }
+
+    /// The bug this covers: a worker's result outlived the track it described.
+    /// `Automix::track_changed` emptied the collector and dropped its own copy
+    /// of the analysis, but the worker still held the finished one, and the
+    /// very next tick adopted it as the track that had just started — so
+    /// every track after the first was planned against its predecessor's grid.
+    #[test]
+    fn a_reset_worker_publishes_nothing_for_the_track_it_left() {
+        let rate = 44_100u32;
+        let worker = Worker::spawn(rate);
+        worker.analyse(clicks(128.0, 20.0, rate), Vec::new(), Default::default());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline && worker.latest().is_none() {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(worker.latest().is_some(), "the click track is analysable");
+
+        worker.reset();
+        assert!(
+            worker.latest().is_none(),
+            "a reset must leave nothing for the next track to adopt"
+        );
+
+        // And a job queued before the reset, still running when it lands, must
+        // not publish over it either. The generation is what carries that:
+        // clearing the slot alone would be raced by this very run.
+        let slow = Worker::spawn(rate);
+        slow.analyse(clicks(128.0, 20.0, rate), Vec::new(), Default::default());
+        slow.reset();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        assert!(
+            slow.latest().is_none(),
+            "an analysis belonging to the reset-away track must be discarded, \
+             not published as the new track's own"
+        );
+    }
+
+    /// A click track at `bpm`, interleaved, for the worker tests.
+    fn clicks(bpm: f64, seconds: f64, rate: u32) -> Vec<f32> {
+        let channels = crate::vis::CHANNELS as usize;
+        let mut samples = vec![0.0f32; (seconds * f64::from(rate)) as usize * channels];
+        let beat = 60.0 / bpm;
+        let mut t = 0.0;
+        while t < seconds {
+            let start = (t * f64::from(rate)) as usize * channels;
+            for i in 0..(rate as usize / 100) {
+                let index = start + i * channels;
+                if index + channels - 1 < samples.len() {
+                    let decay = (-(i as f32) / 60.0).exp();
+                    for channel in 0..channels {
+                        samples[index + channel] = decay;
+                    }
+                }
+            }
+            t += beat;
+        }
+        samples
     }
 }
