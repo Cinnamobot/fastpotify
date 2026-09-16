@@ -53,8 +53,8 @@ struct Cli {
     demo_page: Option<String>,
 
     /// Extra demo surfaces: a comma-separated list of `queue`, `playing-next`,
-    /// `devices`, `shortcuts`, `create`, `light`, `focus`, `update`, `personal-app`,
-    /// `windows-taskbar`, `german`.
+    /// `devices`, `transition`, `shortcuts`, `create`, `light`, `focus`,
+    /// `update`, `personal-app`, `windows-taskbar`, `german`.
     #[cfg(feature = "demo")]
     #[arg(long)]
     demo_show: Option<String>,
@@ -330,8 +330,14 @@ fn main() -> eframe::Result<()> {
                 std::process::exit(2);
             }
         });
+    // `--verbose` carries the engine's own decisions, not only this crate's.
+    // The crossfade and preload handshake is the one part of playback a host
+    // cannot see from its side: whether the player decided to preload, and
+    // whether it had something to mix in, are both decisions taken inside
+    // `librespot-playback`, and a transition that never fires is otherwise
+    // indistinguishable from one that was never planned.
     let default_filter = if cli.verbose {
-        "info,librespot=info,fastpotify=debug"
+        "info,librespot=info,librespot_playback=debug,librespot_connect=debug,fastpotify=debug"
     } else {
         "warn,fastpotify=info"
     };
