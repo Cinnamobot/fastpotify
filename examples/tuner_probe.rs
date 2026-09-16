@@ -14,8 +14,8 @@
 //!   cargo run --example tuner_probe -- spotify:track:...
 //!   cargo run --example tuner_probe -- --batch < tracks.txt
 
-use futures_util::FutureExt;
 use fastpotify::automix_cuepoints::Cuepoints;
+use futures_util::FutureExt;
 use librespot_core::{Session, SessionConfig, SpotifyUri, cache::Cache};
 use librespot_protocol::extension_kind::ExtensionKind;
 
@@ -29,27 +29,26 @@ fn main() -> anyhow::Result<()> {
             .filter(|line| !line.is_empty())
             .collect()
     } else {
-        vec![args
-            .get(1)
-            .cloned()
-            .unwrap_or_else(|| "spotify:track:4uLU6hMCjMI75M1A2tKUQC".into())]
+        vec![
+            args.get(1)
+                .cloned()
+                .unwrap_or_else(|| "spotify:track:4uLU6hMCjMI75M1A2tKUQC".into()),
+        ]
     };
 
     let dirs = fastpotify::paths::AppDirs::discover();
-    let cache = Cache::new(
-        None,
-        None,
-        Some(dirs.audio_cache_dir().as_path()),
-        None,
-    )?
-    .with_memory_credentials();
+    let cache = Cache::new(None, None, Some(dirs.audio_cache_dir().as_path()), None)?
+        .with_memory_credentials();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async move {
         let store = fastpotify::credentials::Store::new(dirs);
-        let loaded = store.lease(fastpotify::credentials::Slot::Playback).load().await?;
+        let loaded = store
+            .lease(fastpotify::credentials::Slot::Playback)
+            .load()
+            .await?;
         let Some(fastpotify::credentials::Grant::Playback(credentials)) = loaded.grant else {
             anyhow::bail!("enable playback in Fastpotify first");
         };
@@ -142,7 +141,9 @@ fn dump(data: &[u8]) {
     let mut shown = 0usize;
     while index < data.len() && shown < 40 {
         let start = index;
-        let Some(key) = varint(data, &mut index) else { break };
+        let Some(key) = varint(data, &mut index) else {
+            break;
+        };
         let field = key >> 3;
         let wire = key & 7;
         let (desc, end) = match wire {
@@ -150,12 +151,12 @@ fn dump(data: &[u8]) {
                 Some(value) => (format!("varint {value}"), index),
                 None => break,
             },
-            1 => (format!("fixed64 {:?}", &data[index..(index + 8).min(data.len())]), index + 8),
+            1 => (
+                format!("fixed64 {:?}", &data[index..(index + 8).min(data.len())]),
+                index + 8,
+            ),
             5 => (
-                format!(
-                    "fixed32 {:?}",
-                    &data[index..(index + 4).min(data.len())]
-                ),
+                format!("fixed32 {:?}", &data[index..(index + 4).min(data.len())]),
                 index + 4,
             ),
             2 => match varint(data, &mut index) {

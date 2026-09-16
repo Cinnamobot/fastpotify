@@ -115,8 +115,8 @@ struct Envelope {
 
 impl Envelope {
     fn new(sample_rate: u32) -> Self {
-        let hop_samples = (ENERGY_HOP_SECONDS * f64::from(sample_rate)) as usize
-            * crate::vis::CHANNELS as usize;
+        let hop_samples =
+            (ENERGY_HOP_SECONDS * f64::from(sample_rate)) as usize * crate::vis::CHANNELS as usize;
         let rate = f64::from(sample_rate);
         let split = std::array::from_fn(|index| OnePole::new(BAND_EDGES[index], rate));
         let max_values = (ENERGY_MAX_SECONDS / ENERGY_HOP_SECONDS) as usize;
@@ -235,14 +235,17 @@ pub fn envelope_of(interleaved: &[f32]) -> Vec<f64> {
 
 /// The total envelope together with its per-band readings.
 ///
-/// The probe's audio arrives whole, so it goes through an [`Envelope`] the
+/// The probe's audio arrives whole, so it goes through an `Envelope` the
 /// same way the playing track does; that keeps one implementation of the
 /// band split rather than two that could drift apart.
 pub fn envelope_with_bands(interleaved: &[f32]) -> (Vec<f64>, [Vec<f64>; NUM_BANDS]) {
     let sample_rate = crate::vis::SAMPLE_RATE;
     let mut envelope = Envelope::new(sample_rate);
     // The envelope works in interleaved f64, as the sink hands it over.
-    let widened: Vec<f64> = interleaved.iter().map(|sample| f64::from(*sample)).collect();
+    let widened: Vec<f64> = interleaved
+        .iter()
+        .map(|sample| f64::from(*sample))
+        .collect();
     envelope.push(&widened);
     (envelope.rms(), envelope.band_rms())
 }
@@ -458,7 +461,9 @@ impl Worker {
                                 analysis
                             },
                         ),
-                        Job::Restructure { envelope, bands, .. } => {
+                        Job::Restructure {
+                            envelope, bands, ..
+                        } => {
                             let kept = published
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())

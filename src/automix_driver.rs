@@ -180,12 +180,10 @@ impl Automix {
     /// itself.
     pub fn set_incoming_track(&mut self, track: SpotifyUri) {
         match &self.next {
-            Some((known, cue)) if *known == track => {
-                // Already named: the preload repeating what the queue said.
-                // Nothing changes, and this is called on every event, so it
-                // must stay silent rather than fill the log once a second.
-                return;
-            }
+            // Already named: the preload repeating what the queue said.
+            // Nothing changes, and this is called on every event, so it
+            // must stay silent rather than fill the log once a second.
+            Some((known, _)) if *known == track => {}
             _ => {
                 log::info!("automix: the incoming track is {track}");
                 self.next = Some((track, None));
@@ -526,7 +524,10 @@ impl Automix {
             return;
         }
         self.restructured_at = reached;
-        self.worker.restructure(self.collector.envelope_rms(), self.collector.envelope_bands());
+        self.worker.restructure(
+            self.collector.envelope_rms(),
+            self.collector.envelope_bands(),
+        );
     }
 
     /// Whether the published analysis describes fewer bars than the
@@ -545,7 +546,7 @@ impl Automix {
         };
         let hops_per_bar =
             (playing.bar_seconds() / crate::automix_track::ENERGY_HOP_SECONDS).round();
-        if !(hops_per_bar >= 1.0) {
+        if hops_per_bar < 1.0 {
             return false;
         }
         // Whole bars the envelope has completed, less the one still filling.
@@ -563,19 +564,19 @@ impl Automix {
     /// than played live because the live path cannot feed a swept deck
     /// without either starving it or reading the track ahead of what has been
     /// heard; see [`automix::render_curve`].
-    pub fn plan(&mut self, elapsed: Duration, out_duration: Duration) -> Option<automix::Transition> {
+    pub fn plan(
+        &mut self,
+        elapsed: Duration,
+        out_duration: Duration,
+    ) -> Option<automix::Transition> {
         // The server's own answer first, wherever it exists: it is what the
         // official client mixes from, and the local analysis is measured
         // against it rather than the other way round. Both halves are needed,
         // because the exit comes from the outgoing track's own cue and the
         // overlap's length from the incoming one's lead-in.
         if let (Some(from), Some((_, Some(to)))) = (self.playing_cuepoints, &self.next)
-            && let Some(planned) = automix::plan_from_cuepoints(
-                &from,
-                to,
-                out_duration,
-                elapsed.as_secs_f64(),
-            )
+            && let Some(planned) =
+                automix::plan_from_cuepoints(&from, to, out_duration, elapsed.as_secs_f64())
         {
             self.plan_came_from_cuepoints = true;
             return Some(planned);
@@ -741,23 +742,29 @@ mod tests {
     #[test]
     fn the_servers_cuepoints_place_the_plan_over_the_local_analysis() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
         // A playing grid whose local analysis would put the exit elsewhere,
         // so a plan that matches the cues cannot have come from it.
-        automix.playing = Some(
-            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
+        automix.playing =
+            Some(Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"));
+        automix.set_playing_cuepoints(
+            &playing_track(),
+            Some(Cuepoints {
+                fade_in_at: 2.0,
+                fade_out_at: 30.0,
+                bpm: 128.0,
+            }),
         );
-        automix.set_playing_cuepoints(&playing_track(), Some(Cuepoints {
-            fade_in_at: 2.0,
-            fade_out_at: 30.0,
-            bpm: 128.0,
-        }));
         automix.set_incoming_track(incoming_track());
-        automix.set_incoming_cuepoints(&incoming_track(), Some(Cuepoints {
-            fade_in_at: 11.5,
-            fade_out_at: 25.0,
-            bpm: 128.0,
-        }));
+        automix.set_incoming_cuepoints(
+            &incoming_track(),
+            Some(Cuepoints {
+                fade_in_at: 11.5,
+                fade_out_at: 25.0,
+                bpm: 128.0,
+            }),
+        );
 
         let planned = automix
             .plan(Duration::from_secs(5), Duration::from_secs(40))
@@ -780,20 +787,23 @@ mod tests {
     #[test]
     fn a_track_without_cuepoints_still_plans_locally() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
-        automix.playing = Some(
-            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
-        );
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        automix.playing =
+            Some(Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"));
         // Only one side answered, which is what a partially covered pair
         // looks like, and what a pair the service knows nothing about looks
         // like is the same fall-through.
         automix.set_playing_cuepoints(&playing_track(), None);
         automix.set_incoming_track(incoming_track());
-        automix.set_incoming_cuepoints(&incoming_track(), Some(Cuepoints {
-            fade_in_at: 11.5,
-            fade_out_at: 25.0,
-            bpm: 128.0,
-        }));
+        automix.set_incoming_cuepoints(
+            &incoming_track(),
+            Some(Cuepoints {
+                fade_in_at: 11.5,
+                fade_out_at: 25.0,
+                bpm: 128.0,
+            }),
+        );
 
         let planned = automix.plan(Duration::from_secs(5), Duration::from_secs(40));
         assert!(
@@ -812,18 +822,25 @@ mod tests {
     #[test]
     fn a_track_change_forgets_the_cuepoints() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
-        automix.set_playing_cuepoints(&playing_track(), Some(Cuepoints {
-            fade_in_at: 2.0,
-            fade_out_at: 30.0,
-            bpm: 128.0,
-        }));
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        automix.set_playing_cuepoints(
+            &playing_track(),
+            Some(Cuepoints {
+                fade_in_at: 2.0,
+                fade_out_at: 30.0,
+                bpm: 128.0,
+            }),
+        );
         automix.set_incoming_track(incoming_track());
-        automix.set_incoming_cuepoints(&incoming_track(), Some(Cuepoints {
-            fade_in_at: 11.5,
-            fade_out_at: 25.0,
-            bpm: 128.0,
-        }));
+        automix.set_incoming_cuepoints(
+            &incoming_track(),
+            Some(Cuepoints {
+                fade_in_at: 11.5,
+                fade_out_at: 25.0,
+                bpm: 128.0,
+            }),
+        );
         automix.track_changed();
         assert!(automix.playing_cuepoints.is_none());
         assert!(automix.incoming_cuepoints().is_none());
@@ -837,7 +854,8 @@ mod tests {
     fn the_driver_names_the_track_a_plan_leads_into() {
         use SpotifyUri;
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
         assert!(
             automix.incoming_track().is_none(),
             "nothing is preloaded, so there is nothing to name"
@@ -858,7 +876,8 @@ mod tests {
     #[test]
     fn a_cue_for_a_track_that_is_not_incoming_is_dropped() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
         let queued = SpotifyUri::from_uri("spotify:track:4uLU6hMCjMI75M1A2tKUQC").expect("a uri");
         let stale = SpotifyUri::from_uri("spotify:track:0aaKu1ym6qIuoIOsTH8uij").expect("a uri");
 
@@ -899,7 +918,8 @@ mod tests {
     #[test]
     fn renaming_the_same_track_keeps_the_cue_already_fetched() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
         let next = incoming_track();
         automix.set_incoming_track(next.clone());
         automix.set_incoming_cuepoints(
@@ -926,20 +946,24 @@ mod tests {
     #[test]
     fn a_track_change_forgets_the_previous_grid() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
-        automix.playing = Some(
-            Analysis::of(&clicks(20.0, 44_100), 44_100).expect("analysable click track"),
-        );
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        automix.playing =
+            Some(Analysis::of(&clicks(20.0, 44_100), 44_100).expect("analysable click track"));
         assert!(automix.playing.is_some());
         automix.track_changed();
         assert!(automix.playing.is_none(), "the old grid must not survive");
-        assert!(!automix.collector.is_ready(44_100), "collection starts over");
+        assert!(
+            !automix.collector.is_ready(44_100),
+            "collection starts over"
+        );
     }
 
     #[test]
     fn a_planned_transition_lands_on_the_playing_track() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
         let audio: Vec<f64> = clicks(35.0, 44_100).iter().map(|s| f64::from(*s)).collect();
         collector.push(&audio);
         assert!(settle(&mut automix, 44_100), "the grid is published");
@@ -955,7 +979,8 @@ mod tests {
     #[test]
     fn a_transition_already_passed_is_not_armed() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
         let audio: Vec<f64> = clicks(35.0, 44_100).iter().map(|s| f64::from(*s)).collect();
         collector.push(&audio);
         assert!(settle(&mut automix, 44_100));
@@ -976,7 +1001,8 @@ mod tests {
     #[test]
     fn no_grid_arms_nothing() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
         assert!(automix.playing.is_none(), "nothing analysed yet");
         assert!(
             automix
@@ -993,10 +1019,10 @@ mod tests {
     #[test]
     fn a_wide_tempo_gap_still_arms_a_matched_transition() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
-        automix.playing = Some(
-            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
-        );
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        automix.playing =
+            Some(Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"));
         automix.incoming = Some((
             Analysis::of(&clicks_at(176.0, 20.0, 44_100), 44_100).expect("analysable"),
             0.0,
@@ -1069,10 +1095,10 @@ mod tests {
     #[test]
     fn a_plan_is_handed_over_at_once_and_only_once() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
-        automix.playing = Some(
-            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
-        );
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        automix.playing =
+            Some(Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"));
 
         // A plan is handed over as soon as there is one, however far out. It
         // is the player that decides when to act on it, and it does so from
@@ -1119,10 +1145,10 @@ mod tests {
     #[test]
     fn a_plan_is_taken_back_when_the_track_moves_on() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
-        automix.playing = Some(
-            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
-        );
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        automix.playing =
+            Some(Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"));
         let near = Duration::from_millis(240_000 - 8_000);
         assert!(matches!(
             automix.take_plan_change(near, Duration::from_secs(240)),
@@ -1150,10 +1176,10 @@ mod tests {
     #[test]
     fn a_provisional_plan_is_revised_once_the_incoming_grid_arrives() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
-        automix.playing = Some(
-            Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"),
-        );
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        automix.playing =
+            Some(Analysis::of(&clicks(35.0, 44_100), 44_100).expect("analysable click track"));
 
         // Walk in from far out to the boundary and take the first plan that
         // is handed over. The exact lead-in depends on where the exit lands,
@@ -1188,7 +1214,10 @@ mod tests {
         while std::time::Instant::now() < deadline && automix.incoming_analysis().is_none() {
             std::thread::sleep(Duration::from_millis(25));
         }
-        assert!(automix.incoming_analysis().is_some(), "the probe produced a grid");
+        assert!(
+            automix.incoming_analysis().is_some(),
+            "the probe produced a grid"
+        );
 
         // Now a matched plan must replace the provisional one. Without this
         // the transition fires at 1.0x and nothing is stretched.
@@ -1264,7 +1293,10 @@ mod tests {
             "tracked {} for a 128 BPM click",
             first.bpm
         );
-        assert!(automix.restructured_at > 0, "the first track's structure was read");
+        assert!(
+            automix.restructured_at > 0,
+            "the first track's structure was read"
+        );
 
         automix.track_changed();
         assert!(
@@ -1346,10 +1378,8 @@ mod tests {
         // But an unrenderable one is not asked for again, however often the
         // position moves. Ten passes is what a few seconds of playback is.
         for pass in 0..10 {
-            let again = automix.take_plan_change(
-                Duration::from_secs(5 + pass),
-                Duration::from_secs(300),
-            );
+            let again =
+                automix.take_plan_change(Duration::from_secs(5 + pass), Duration::from_secs(300));
             assert!(
                 again.is_none(),
                 "pass {pass}: the same unrenderable plan was offered again, which \
@@ -1368,12 +1398,16 @@ mod tests {
     #[test]
     fn an_incoming_grid_moves_the_start_onto_its_downbeat() {
         let collector = Collector::new(44_100);
-        let mut automix = Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
+        let mut automix =
+            Automix::new(Some(Arc::clone(&collector)), 44_100, shared_view()).expect("on");
 
         // The outgoing track, measured from its start.
         let audio: Vec<f64> = clicks(35.0, 44_100).iter().map(|s| f64::from(*s)).collect();
         collector.push(&audio);
-        assert!(settle(&mut automix, 44_100), "the outgoing grid is published");
+        assert!(
+            settle(&mut automix, 44_100),
+            "the outgoing grid is published"
+        );
 
         // A probe of the incoming track, whose grid has its own phase.
         let probe_samples = clicks(20.0, 44_100);

@@ -179,11 +179,7 @@ impl Analysis {
     /// they can only say where the loudest part *of that window* is. The
     /// envelope covers the whole track, so it is what knows where the last
     /// chorus is — which is the thing automix has to leave after.
-    pub fn of_with_envelope(
-        samples: &[f32],
-        sample_rate: u32,
-        envelope: &[f64],
-    ) -> Option<Self> {
+    pub fn of_with_envelope(samples: &[f32], sample_rate: u32, envelope: &[f64]) -> Option<Self> {
         if samples.is_empty() {
             return None;
         }
@@ -254,8 +250,7 @@ impl Analysis {
     pub fn chorus_ended_by(&self, now: f64) -> Option<LoudSection> {
         self.loud_sections()
             .into_iter()
-            .filter(|section| section.end <= now)
-            .next_back()
+            .rfind(|section| section.end <= now)
     }
 
     /// The first chorus that starts at or after `from`.
@@ -771,7 +766,7 @@ pub fn bars_of(duration: Duration, bpm: f64) -> f64 {
 ///
 /// The overlap's *length* is not part of the answer: it is a separate choice
 /// the clients take from their own configuration, so it stays local and is
-/// picked from [`BAR_CHOICES`] against the tempo the cues were measured at.
+/// picked from `BAR_CHOICES` against the tempo the cues were measured at.
 /// That is also why the tempo comes from here rather than from the local
 /// tracker — mixing at a tempo the cues were not placed against would put the
 /// beats back out of line.
@@ -873,7 +868,7 @@ pub fn plan_exit_for(from: &Analysis, out_duration: Duration) -> Option<Transiti
 ///
 /// Returns `None` only when the outgoing track has no room left to fade in,
 /// which is a property of that track alone; the pair's tempos cannot make it
-/// fail, because [`fold_octave`] always brings them within reach.
+/// fail, because `fold_octave` always brings them within reach.
 pub fn plan_exit_matched(
     from: &Analysis,
     incoming: Option<&Analysis>,
@@ -1053,7 +1048,9 @@ mod tests {
     /// buffer holds. Enough to tell a curve from a constant render, without
     /// needing a tracker.
     fn count_onsets(samples: &[f32], channels: usize) -> usize {
-        let peak = samples.iter().fold(0.0f32, |worst, sample| worst.max(sample.abs()));
+        let peak = samples
+            .iter()
+            .fold(0.0f32, |worst, sample| worst.max(sample.abs()));
         if peak <= 0.0 {
             return 0;
         }
@@ -1063,7 +1060,6 @@ mod tests {
             .filter(|pair| pair[0] < half && pair[1] >= half)
             .count()
     }
-
 
     /// The lock the whole curve exists for: whatever the two decks are doing,
     /// their rates keep a constant quotient, or their beats would drift apart
@@ -1156,9 +1152,11 @@ mod tests {
         let channels = crate::vis::CHANNELS as usize;
         let hz = 220.0f64;
         let seconds = 12.0;
-        let mut source: Vec<f32> = Vec::with_capacity((seconds * f64::from(rate)) as usize * channels);
+        let mut source: Vec<f32> =
+            Vec::with_capacity((seconds * f64::from(rate)) as usize * channels);
         for frame in 0..(seconds * f64::from(rate)) as usize {
-            let value = (2.0 * std::f32::consts::PI * hz as f32 * frame as f32 / rate as f32).sin() * 0.5;
+            let value =
+                (2.0 * std::f32::consts::PI * hz as f32 * frame as f32 / rate as f32).sin() * 0.5;
             for _ in 0..channels {
                 source.push(value);
             }
@@ -1240,7 +1238,6 @@ mod tests {
         }
     }
 
-
     /// Nothing to render must produce nothing, so the caller can fall back
     /// instead of mixing a hole into the overlap.
     #[test]
@@ -1287,7 +1284,6 @@ mod tests {
             "{beats} beats is also what a flat render gives ({flat:.1}), so nothing was proven"
         );
     }
-
 
     /// The bug this covers: the sample window only reaches the first 60
     /// seconds, so on a long track the loudest part *it* holds is an early
@@ -1446,8 +1442,7 @@ mod tests {
                 let noise = (seed >> 40) as f64 / 8_388_608.0 - 1.0;
                 let value = (0.3 * (std::f64::consts::TAU * 440.0 * t).sin()
                     + 0.4 * (std::f64::consts::TAU * 60.0 * t).sin()
-                    + 0.15 * noise)
-                    as f32;
+                    + 0.15 * noise) as f32;
                 [value; CHANNELS]
             })
             .collect();
@@ -1518,8 +1513,7 @@ mod tests {
             ("chorus", 20.0),
             ("outro", 12.0),
         ]);
-        let mut analysis =
-            Analysis::of(&click_track(128.0, 30.0, 44_100), 44_100).expect("a grid");
+        let mut analysis = Analysis::of(&click_track(128.0, 30.0, 44_100), 44_100).expect("a grid");
         analysis.refresh_bands(&bands);
 
         let sections = analysis.loud_sections();
@@ -1554,8 +1548,7 @@ mod tests {
             ("chorus", 20.0),
             ("outro", 12.0),
         ]);
-        let mut analysis =
-            Analysis::of(&click_track(128.0, 30.0, 44_100), 44_100).expect("a grid");
+        let mut analysis = Analysis::of(&click_track(128.0, 30.0, 44_100), 44_100).expect("a grid");
         analysis.refresh_bands(&bands);
 
         // Partway through the second verse, the first chorus is the last one
@@ -1586,8 +1579,7 @@ mod tests {
     #[test]
     fn a_track_with_no_chorus_reports_none() {
         let bands = band_envelope(&[("intro", 10.0), ("verse", 40.0), ("outro", 10.0)]);
-        let mut analysis =
-            Analysis::of(&click_track(128.0, 30.0, 44_100), 44_100).expect("a grid");
+        let mut analysis = Analysis::of(&click_track(128.0, 30.0, 44_100), 44_100).expect("a grid");
         analysis.refresh_bands(&bands);
         assert!(
             analysis.loud_sections().is_empty(),
@@ -1638,7 +1630,13 @@ mod tests {
             shifted[0].start
         );
         assert!(
-            (anchored.chorus_starting_after(80.0).expect("a chorus").start - 88.0).abs() < 4.0,
+            (anchored
+                .chorus_starting_after(80.0)
+                .expect("a chorus")
+                .start
+                - 88.0)
+                .abs()
+                < 4.0,
             "the accessors must report anchored times too"
         );
     }
@@ -1717,7 +1715,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn octave_folding_leaves_a_close_tempo_alone() {
         let ratio = 1.03;
@@ -1734,8 +1731,7 @@ mod tests {
     #[test]
     fn an_unmatched_incoming_track_still_plans_a_downbeat_exit() {
         let a = Analysis::of(&click_track(128.0, 40.0, 44_100), 44_100).unwrap();
-        let planned =
-            plan_exit(&a, Duration::from_secs(40)).expect("one analysed track is enough");
+        let planned = plan_exit(&a, Duration::from_secs(40)).expect("one analysed track is enough");
         // Nothing is stretched when the other grid is unknown.
         assert_eq!(planned.tempo_ratio, 1.0);
         assert_eq!(planned.fade_in_at, 0.0);
@@ -1802,7 +1798,10 @@ mod tests {
         let planned = plan_from_cuepoints(&from, &to, Duration::from_secs(238), 0.0)
             .expect("the pair has cues on both sides");
 
-        assert!((planned.fade_out_at - 221.8).abs() < 1e-9, "the exit is the cue");
+        assert!(
+            (planned.fade_out_at - 221.8).abs() < 1e-9,
+            "the exit is the cue"
+        );
         assert!(
             (planned.fade_in_at - 17.6).abs() < 1e-9,
             "the arrival is the incoming track's own cue, not its first sample"
@@ -1941,7 +1940,10 @@ mod tests {
             (planned.tempo_ratio - expected).abs() < 1e-9,
             "the ratio must be the two measured tempos' quotient"
         );
-        assert!(planned.tempo_ratio > 1.0, "the faster incoming track speeds the tail up");
+        assert!(
+            planned.tempo_ratio > 1.0,
+            "the faster incoming track speeds the tail up"
+        );
     }
 
     /// The outgoing tail must not run out before the fade does: the material

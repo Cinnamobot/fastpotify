@@ -205,10 +205,11 @@ fn main() -> anyhow::Result<()> {
             .filter(|line| !line.is_empty())
             .collect()
     } else {
-        vec![args
-            .get(1)
-            .cloned()
-            .unwrap_or_else(|| "spotify:track:0aaKu1ym6qIuoIOsTH8uij".into())]
+        vec![
+            args.get(1)
+                .cloned()
+                .unwrap_or_else(|| "spotify:track:0aaKu1ym6qIuoIOsTH8uij".into()),
+        ]
     };
     let seconds: f64 = args
         .iter()
@@ -217,13 +218,8 @@ fn main() -> anyhow::Result<()> {
         .unwrap_or(600.0);
 
     let dirs = fastpotify::paths::AppDirs::discover();
-    let cache = Cache::new(
-        None,
-        None,
-        Some(dirs.audio_cache_dir().as_path()),
-        None,
-    )?
-    .with_memory_credentials();
+    let cache = Cache::new(None, None, Some(dirs.audio_cache_dir().as_path()), None)?
+        .with_memory_credentials();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -231,7 +227,10 @@ fn main() -> anyhow::Result<()> {
     let store = fastpotify::credentials::Store::new(dirs);
     let mut sampled: Vec<(String, Vec<f32>)> = Vec::new();
     runtime.block_on(async {
-        let loaded = store.lease(fastpotify::credentials::Slot::Playback).load().await?;
+        let loaded = store
+            .lease(fastpotify::credentials::Slot::Playback)
+            .load()
+            .await?;
         let Some(fastpotify::credentials::Grant::Playback(credentials)) = loaded.grant else {
             anyhow::bail!("enable playback in Fastpotify first");
         };
@@ -262,8 +261,7 @@ fn main() -> anyhow::Result<()> {
         let mut ratios: Vec<f64> = Vec::new();
         for (track, samples) in &sampled {
             let (envelope, bands) = envelope_with_bands(samples);
-            let Some(mut analysis) =
-                Analysis::of_with_envelope(samples, SAMPLE_RATE, &envelope)
+            let Some(mut analysis) = Analysis::of_with_envelope(samples, SAMPLE_RATE, &envelope)
             else {
                 println!("{track}: no grid");
                 continue;
@@ -328,7 +326,11 @@ fn main() -> anyhow::Result<()> {
             if dump {
                 let name = track.replace(':', "_");
                 let mut out = String::new();
-                out.push_str(&format!("# bpm {:.2} bar {:.3} hop 0.05\n", analysis.bpm, analysis.bar_seconds()));
+                out.push_str(&format!(
+                    "# bpm {:.2} bar {:.3} hop 0.05\n",
+                    analysis.bpm,
+                    analysis.bar_seconds()
+                ));
                 for (index, value) in smoothed.iter().enumerate() {
                     out.push_str(&format!("band {:.6}\n", value));
                     let _ = index;
@@ -372,7 +374,9 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let (track, samples) = sampled.pop().ok_or_else(|| anyhow::anyhow!("nothing decoded"))?;
+    let (track, samples) = sampled
+        .pop()
+        .ok_or_else(|| anyhow::anyhow!("nothing decoded"))?;
     let frames = samples.len() / NUM_CHANNELS as usize;
     println!(
         "decoded {frames} frames ({:.1}s) from {track}",
@@ -398,7 +402,10 @@ fn main() -> anyhow::Result<()> {
     let ratio: Vec<f64> = (0..bands[1].len().min(bands[2].len()))
         .map(|index| bands[2][index] / bands[1][index].max(f64::MIN_POSITIVE))
         .collect();
-    println!("\nband ratio (high/mid) over {:.0}s", ratio.len() as f64 * 0.05);
+    println!(
+        "\nband ratio (high/mid) over {:.0}s",
+        ratio.len() as f64 * 0.05
+    );
     println!("  {}", spark(&ratio, 90));
     let mut sorted = ratio.clone();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -424,7 +431,10 @@ fn main() -> anyhow::Result<()> {
             bsorted[bsorted.len() - 1],
             bsorted[bsorted.len() - 1] / bmedian.max(f64::MIN_POSITIVE)
         );
-        println!("\n  loudest 16-bar span: {:?}", analysis.loudest_span(&bars, 16));
+        println!(
+            "\n  loudest 16-bar span: {:?}",
+            analysis.loudest_span(&bars, 16)
+        );
     }
 
     let sections = analysis.loud_sections();
@@ -433,15 +443,26 @@ fn main() -> anyhow::Result<()> {
         println!("  none - the pair would fall back to the first downbeat");
     }
     for section in &sections {
-        println!("  {:.1}s - {:.1}s ({:.1}s)", section.start, section.end, section.end - section.start);
+        println!(
+            "  {:.1}s - {:.1}s ({:.1}s)",
+            section.start,
+            section.end,
+            section.end - section.start
+        );
     }
 
     for now in [30.0, 60.0, 90.0, 120.0] {
         println!(
             "  first chorus after {now:.0}s: {:?}",
-            analysis.chorus_starting_after(now).map(|s| (s.start, s.end))
+            analysis
+                .chorus_starting_after(now)
+                .map(|s| (s.start, s.end))
         );
     }
-    println!("\nbands: {} readings each, {} of {NUM_BANDS}", bands[0].len(), NUM_BANDS);
+    println!(
+        "\nbands: {} readings each, {} of {NUM_BANDS}",
+        bands[0].len(),
+        NUM_BANDS
+    );
     Ok(())
 }

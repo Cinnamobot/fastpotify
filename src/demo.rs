@@ -2271,23 +2271,24 @@ mod tests {
             }),
             ..LocalState::default()
         };
-        *app.automix_view.lock().expect("the view is not poisoned") = crate::automix_driver::AutomixView {
-            fade_out_at: Some(60.0),
-            fade_in_at: Some(20.0),
-            overlap: Some(4.0),
-            tempo_ratio: Some(1.0),
-            from_cuepoints: true,
-            playing_cuepoints: Some(Cuepoints {
-                fade_in_at: 20.0,
-                fade_out_at: 60.0,
-                bpm: 128.0,
-            }),
-            incoming_cuepoints: Some(Cuepoints {
-                fade_in_at: 20.0,
-                fade_out_at: 100.0,
-                bpm: 128.0,
-            }),
-        };
+        *app.automix_view.lock().expect("the view is not poisoned") =
+            crate::automix_driver::AutomixView {
+                fade_out_at: Some(60.0),
+                fade_in_at: Some(20.0),
+                overlap: Some(4.0),
+                tempo_ratio: Some(1.0),
+                from_cuepoints: true,
+                playing_cuepoints: Some(Cuepoints {
+                    fade_in_at: 20.0,
+                    fade_out_at: 60.0,
+                    bpm: 128.0,
+                }),
+                incoming_cuepoints: Some(Cuepoints {
+                    fade_in_at: 20.0,
+                    fade_out_at: 100.0,
+                    bpm: 128.0,
+                }),
+            };
         let view = crate::ui::player_bar::show;
         // Two frames: the first lays the bar out, the second paints it at the
         // geometry the first settled on.
@@ -2350,9 +2351,17 @@ mod tests {
         // The exit marks the bar, at the same x the band opens at; the arrival
         // marks the lane below it, and the lane is inside the bar rather than
         // clipped off its bottom edge.
-        let exit = painted.lines.iter().map(|(x, ..)| *x).fold(f32::NAN, |best, x| {
-            if (x - band.left()).abs() < 0.5 { x } else { best }
-        });
+        let exit = painted
+            .lines
+            .iter()
+            .map(|(x, ..)| *x)
+            .fold(f32::NAN, |best, x| {
+                if (x - band.left()).abs() < 0.5 {
+                    x
+                } else {
+                    best
+                }
+            });
         assert!(
             exit.is_finite(),
             "the exit at 60.0s was not drawn at the band's edge {}: {:?}",
@@ -2373,8 +2382,14 @@ mod tests {
             painted.lines
         );
         let lane = (
-            lane_lines.iter().map(|(_, top, _)| *top).fold(f32::INFINITY, f32::min),
-            lane_lines.iter().map(|(_, _, bottom)| *bottom).fold(0.0f32, f32::max),
+            lane_lines
+                .iter()
+                .map(|(_, top, _)| *top)
+                .fold(f32::INFINITY, f32::min),
+            lane_lines
+                .iter()
+                .map(|(_, _, bottom)| *bottom)
+                .fold(0.0f32, f32::max),
         );
         assert!(
             lane.1 <= 800.0,
@@ -2398,7 +2413,10 @@ mod tests {
             .map(|(text, _)| text.as_str())
             .collect();
         for text in ["exit 60.0s", "arrival 20.0s"] {
-            assert!(printed.contains(&text), "{text} was not printed: {printed:?}");
+            assert!(
+                printed.contains(&text),
+                "{text} was not printed: {printed:?}"
+            );
         }
         // Each value is printed beside the mark it names, on the lane.
         for (text, x) in [("exit 60.0s", exit), ("arrival 20.0s", arrival)] {

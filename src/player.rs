@@ -581,7 +581,6 @@ impl Engine {
         skip_is_mixed(command, self.crossfade)
     }
 
-
     fn send_command(&self, command: PlayerCommand) -> Result<()> {
         let spirc = &self.spirc;
         match command {
@@ -663,10 +662,7 @@ fn command_interrupts_audio(state: &LocalState, command: &PlayerCommand) -> bool
 /// overlap is what covers the handover. A `Load` names its own track and is
 /// often a fresh start rather than a mix, so it always cuts.
 fn skip_is_mixed(command: &PlayerCommand, crossfade: Duration) -> bool {
-    matches!(
-        command,
-        PlayerCommand::Next | PlayerCommand::Previous
-    ) && !crossfade.is_zero()
+    matches!(command, PlayerCommand::Next | PlayerCommand::Previous) && !crossfade.is_zero()
 }
 
 /// Builds the audio sink and chooses where volume is applied.
@@ -784,7 +780,9 @@ async fn run_events(
             // Dropped as belonging to another play request. Worth a line: a
             // preload is answered under the request that asked for it, and one
             // dropped here never becomes `Ready`.
-            log::debug!("automix: dropping {event:?}, it is for play request {incoming}, not {current}");
+            log::debug!(
+                "automix: dropping {event:?}, it is for play request {incoming}, not {current}"
+            );
             continue;
         }
         // The preload handshake is the one thing automix cannot work without:
@@ -1539,8 +1537,7 @@ mod tests {
             fetches.remember(uri, None);
         }
         let oldest = librespot_core::SpotifyUri::from_uri(&tracks[0]).expect("a uri");
-        let newest =
-            librespot_core::SpotifyUri::from_uri(tracks.last().unwrap()).expect("a uri");
+        let newest = librespot_core::SpotifyUri::from_uri(tracks.last().unwrap()).expect("a uri");
         assert!(
             fetches.answer_for(&oldest).is_none(),
             "the oldest answers are dropped once the cache is full"
@@ -1618,9 +1615,8 @@ mod tests {
 
         // An answer that arrives is held, and told to no one more than once
         // per pass is the engine's business; this only checks it is kept.
-        let answered =
-            librespot_core::SpotifyUri::from_uri("spotify:track:2tak3H7HGKtRsAmEcLc1VO")
-                .expect("a uri");
+        let answered = librespot_core::SpotifyUri::from_uri("spotify:track:2tak3H7HGKtRsAmEcLc1VO")
+            .expect("a uri");
         fetches.record(
             answered.clone(),
             Ok(crate::automix_cuepoints::Cuepoints {

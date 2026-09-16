@@ -608,11 +608,11 @@ fn transition_marks(
         ui.painter()
             .vline(arrival, lane.y_range(), egui::Stroke::new(1.5, plan));
     }
-    if let Some(x) = cued_arrival {
-        if arrival.is_none_or(|arrival| apart(arrival, x)) {
-            ui.painter()
-                .vline(x, lane.y_range(), egui::Stroke::new(1.0, palette.secondary));
-        }
+    if let Some(x) = cued_arrival
+        && arrival.is_none_or(|arrival| apart(arrival, x))
+    {
+        ui.painter()
+            .vline(x, lane.y_range(), egui::Stroke::new(1.0, palette.secondary));
     }
 
     // The values, beside their own marks, in the words the transition log

@@ -10,11 +10,11 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use librespot_playback::NUM_CHANNELS;
 use librespot_playback::audio_backend::{Sink, SinkResult};
 use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
 use librespot_playback::mixer::VolumeGetter;
-use librespot_playback::NUM_CHANNELS;
 
 /// Channels in every buffer that crosses this module, and in the tap's own
 /// buffers. Re-exported so automix counts channels the same way the audio
