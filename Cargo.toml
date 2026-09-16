@@ -217,10 +217,10 @@ projectm-sys = { git = "https://github.com/crmne/projectm-rs", branch = "respect
 # repeats while the queue has nothing to give it.
 # Every librespot crate comes from the fork so one copy exists. Drop patches
 # as upstream takes them.
-librespot-audio = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
-librespot-connect = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
-librespot-core = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
-librespot-metadata = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
-librespot-oauth = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
-librespot-playback = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
-librespot-protocol = { git = "https://github.com/Cinnamobot/librespot", branch = "fastpotify-automix" }
+librespot-audio = { git = "https://github.com/Cinnamobot/librespot", branch = "main" }
+librespot-connect = { git = "https://github.com/Cinnamobot/librespot", branch = "main" }
+librespot-core = { git = "https://github.com/Cinnamobot/librespot", branch = "main" }
+librespot-metadata = { git = "https://github.com/Cinnamobot/librespot", branch = "main" }
+librespot-oauth = { git = "https://github.com/Cinnamobot/librespot", branch = "main" }
+librespot-playback = { git = "https://github.com/Cinnamobot/librespot", branch = "main" }
+librespot-protocol = { git = "https://github.com/Cinnamobot/librespot", branch = "main" }
