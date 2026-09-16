@@ -624,6 +624,28 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.queue_tab = QueueTab::Recents;
             }
             "devices" => app.show_devices = true,
+            // A transition in flight, so a screenshot shows the marks the
+            // player bar draws for one. The numbers are the sort a server
+            // cue produces: the song fades out at 1:23 and the next one is
+            // brought in 11 seconds past its own intro.
+            "transition" => {
+                if let Ok(mut view) = app.automix_view.lock() {
+                    let cue = |fade_in_at, fade_out_at| crate::automix_cuepoints::Cuepoints {
+                        fade_in_at,
+                        fade_out_at,
+                        bpm: 122.0,
+                    };
+                    *view = crate::automix_driver::AutomixView {
+                        fade_out_at: Some(83.0),
+                        fade_in_at: Some(11.5),
+                        overlap: Some(6.0),
+                        tempo_ratio: Some(1.0),
+                        from_cuepoints: true,
+                        playing_cuepoints: Some(cue(11.0, 83.0)),
+                        incoming_cuepoints: Some(cue(11.5, 180.0)),
+                    };
+                }
+            }
             "german" => app.locale = crate::i18n::Locale::German,
             "update" => {
                 app.update = Some(crate::updates::Release {
@@ -2221,6 +2243,180 @@ mod tests {
         events: Vec<egui::Event>,
     ) -> Vec<(String, egui::Rect)> {
         view_frame(ctx, app, events, crate::ui::search::show)
+    }
+
+    /// The transition bar shows the plan's own numbers, at the positions those
+    /// numbers name, and it fits inside the bar it is drawn in. The bar is one
+    /// place where a transition can be read off the interface at all, so a
+    /// mark that is clipped away or drawn at another moment is invisible
+    /// rather than wrong — which is what this pins.
+    #[test]
+    fn the_player_bar_shows_a_transition_at_the_numbers_it_was_given() {
+        use crate::automix_cuepoints::Cuepoints;
+        use crate::player::{LocalState, LocalTrack, Playback};
+
+        let (ctx, mut app) = accessible_app("transition-marks");
+        app.local = LocalState {
+            playback: Playback::Playing,
+            track: Some(LocalTrack {
+                uri: "spotify:track:now".into(),
+                title: "Now".into(),
+                artists: vec![ArtistRef {
+                    id: Some("a".into()),
+                    name: "Someone".into(),
+                    uri: Some("spotify:artist:a".into()),
+                }],
+                duration_ms: 200_000,
+                ..LocalTrack::default()
+            }),
+            ..LocalState::default()
+        };
+        *app.automix_view.lock().expect("the view is not poisoned") = crate::automix_driver::AutomixView {
+            fade_out_at: Some(60.0),
+            fade_in_at: Some(20.0),
+            overlap: Some(4.0),
+            tempo_ratio: Some(1.0),
+            from_cuepoints: true,
+            playing_cuepoints: Some(Cuepoints {
+                fade_in_at: 20.0,
+                fade_out_at: 60.0,
+                bpm: 128.0,
+            }),
+            incoming_cuepoints: Some(Cuepoints {
+                fade_in_at: 20.0,
+                fade_out_at: 100.0,
+                bpm: 128.0,
+            }),
+        };
+        let view = crate::ui::player_bar::show;
+        // Two frames: the first lays the bar out, the second paints it at the
+        // geometry the first settled on.
+        view_frame(&ctx, &mut app, vec![], view);
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            },
+            |ui| view(&mut app, ui),
+        );
+        output.textures_delta.clear();
+
+        #[derive(Default)]
+        struct Painted {
+            lines: Vec<(f32, f32, f32)>,
+            labels: Vec<(String, egui::Rect)>,
+            bands: Vec<egui::Rect>,
+        }
+        fn walk(shape: &egui::epaint::Shape, painted: &mut Painted) {
+            match shape {
+                egui::epaint::Shape::LineSegment { points, .. } if points[0].x == points[1].x => {
+                    let (top, bottom) = if points[0].y < points[1].y {
+                        (points[0].y, points[1].y)
+                    } else {
+                        (points[1].y, points[0].y)
+                    };
+                    painted.lines.push((points[0].x, top, bottom));
+                }
+                egui::epaint::Shape::Text(text) => painted.labels.push((
+                    text.galley.job.text.clone(),
+                    text.galley.rect.translate(text.pos.to_vec2()),
+                )),
+                egui::epaint::Shape::Rect(rect) => painted.bands.push(rect.rect),
+                egui::epaint::Shape::Vec(shapes) => {
+                    shapes.iter().for_each(|shape| walk(shape, painted))
+                }
+                _ => {}
+            }
+        }
+        let mut painted = Painted::default();
+        for shape in &output.shapes {
+            walk(&shape.shape, &mut painted);
+        }
+
+        // The overlap band gives the ruler: 4 seconds of a 200-second track,
+        // so it is a fiftieth of the seek bar's width, and every mark's
+        // position can be checked against its seconds through it. It is the
+        // only rect here with the bar's own height rather than the panel's.
+        let band = painted
+            .bands
+            .iter()
+            .find(|rect| (10.0..14.0).contains(&rect.height()) && rect.left() > 100.0)
+            .unwrap_or_else(|| panic!("the overlap band was not drawn: {:?}", painted.bands));
+        let per_second = band.width() / 4.0;
+
+        // The exit marks the bar, at the same x the band opens at; the arrival
+        // marks the lane below it, and the lane is inside the bar rather than
+        // clipped off its bottom edge.
+        let exit = painted.lines.iter().map(|(x, ..)| *x).fold(f32::NAN, |best, x| {
+            if (x - band.left()).abs() < 0.5 { x } else { best }
+        });
+        assert!(
+            exit.is_finite(),
+            "the exit at 60.0s was not drawn at the band's edge {}: {:?}",
+            band.left(),
+            painted.lines
+        );
+        // The lane below the bar carries the same two moments mirrored, so its
+        // own lines are what the values are read against.
+        let lane_lines: Vec<(f32, f32, f32)> = painted
+            .lines
+            .iter()
+            .filter(|(_, top, _)| *top > band.bottom())
+            .copied()
+            .collect();
+        assert!(
+            !lane_lines.is_empty(),
+            "nothing was drawn on the lane: {:?}",
+            painted.lines
+        );
+        let lane = (
+            lane_lines.iter().map(|(_, top, _)| *top).fold(f32::INFINITY, f32::min),
+            lane_lines.iter().map(|(_, _, bottom)| *bottom).fold(0.0f32, f32::max),
+        );
+        assert!(
+            lane.1 <= 800.0,
+            "the lane must be inside the bar, not clipped off its bottom edge: {lane:?}"
+        );
+        let expected = band.left() + (20.0 - 60.0) * per_second;
+        let (arrival, _, _) = lane_lines
+            .iter()
+            .copied()
+            .min_by(|a, b| (a.0 - expected).abs().total_cmp(&(b.0 - expected).abs()))
+            .expect("the lane has a line");
+        assert!(
+            (arrival - expected).abs() < 0.5,
+            "the arrival at 20.0s should sit at {expected}, 40s left of the exit at 60.0s: \
+             lane lines {lane_lines:?}"
+        );
+
+        let printed: Vec<&str> = painted
+            .labels
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect();
+        for text in ["exit 60.0s", "arrival 20.0s"] {
+            assert!(printed.contains(&text), "{text} was not printed: {printed:?}");
+        }
+        // Each value is printed beside the mark it names, on the lane.
+        for (text, x) in [("exit 60.0s", exit), ("arrival 20.0s", arrival)] {
+            let (_, rect) = painted
+                .labels
+                .iter()
+                .find(|(label, _)| label == text)
+                .unwrap_or_else(|| panic!("{text} was never placed"));
+            assert!(
+                (rect.center().y - (lane.0 + lane.1) / 2.0).abs() < 1.0,
+                "{text} should be printed on the lane: {rect:?} vs {lane:?}"
+            );
+            assert!(
+                rect.left() >= x && rect.left() - x <= 6.0,
+                "{text} should sit just past its mark at {x}: {rect:?}"
+            );
+        }
+        app.backend.shutdown();
     }
 
     #[test]
