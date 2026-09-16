@@ -20,7 +20,9 @@ use crate::media_controls::MediaService;
 use crate::model::QueueTab;
 use crate::model::*;
 use crate::paths::AppDirs;
-use crate::player::{EngineConfig, LoadSpec, LocalState, Playback, PlayerCommand, RepeatMode};
+use crate::player::{
+    EngineConfig, LoadSpec, LocalState, Playback, PlaybackFailure, PlayerCommand, RepeatMode,
+};
 use crate::settings::{CachedRootlist, SessionState, Settings, ThemeChoice};
 use crate::single_instance::ControlCommand;
 use crate::theme::{self, Palette};
@@ -335,6 +337,12 @@ pub struct App {
     /// When to take a confirming look at remote playback after a command.
     remote_recheck_at: Option<Instant>,
     pub seek_preview: Option<f32>,
+    /// What automix is holding for the playing track, published by the engine
+    /// so the progress bar can show where a transition will run.
+    pub automix_view: crate::automix_driver::SharedAutomixView,
+    /// The plan the transition log was last written for, so a line is written
+    /// when the plan changes rather than on every frame the bar is drawn.
+    pub automix_logged: Option<(Option<u64>, Option<u64>, bool, bool)>,
     pub volume_preview: Option<f32>,
     /// Window geometry to restore on next attach, from the session file.
     session_window_size: Option<[f32; 2]>,
@@ -481,11 +489,13 @@ impl App {
         if let Ok(mut shared) = eq.lock() {
             *shared = eq_settings(&settings);
         }
+        let automix_view = crate::automix_driver::shared_view();
         let engine_config = engine_config(
             &dirs,
             &settings,
             std::sync::Arc::clone(&tap),
             std::sync::Arc::clone(&eq),
+            std::sync::Arc::clone(&automix_view),
         );
         let backend = Backend::spawn(
             dirs.clone(),
@@ -637,6 +647,8 @@ impl App {
             pending_transfer_to: None,
             remote_recheck_at: None,
             seek_preview: None,
+            automix_view,
+            automix_logged: None,
             volume_preview: None,
             session_window_size: session.window_size,
             session_window_pos: session.window_pos,
@@ -1657,6 +1669,25 @@ impl App {
             .sum()
     }
 
+    /// Rebuilds the local session after the audio-key service has failed.
+    ///
+    /// Rate-limited by `last_unavailable_reconnect`, because a reconnect
+    /// takes seconds and the failures that trigger it arrive faster than
+    /// that: without the cooldown a broken service would restart the session
+    /// on every event.
+    fn reconnect_local(&mut self, now: Instant) {
+        if self
+            .last_unavailable_reconnect
+            .is_some_and(|at| at.elapsed() <= Duration::from_secs(60))
+        {
+            return;
+        }
+        self.unavailable_at.clear();
+        self.last_unavailable_reconnect = Some(now);
+        self.backend.send(Command::Reconnect);
+        self.toast("Spotify audio disconnected. Reconnecting local playback");
+    }
+
     fn handle_local(&mut self, state: LocalState) {
         let track_changed = state.track != self.local.track;
         let reconnected = state.connected && !self.local.connected;
@@ -1695,25 +1726,28 @@ impl App {
             && self.local.error.as_deref() != Some(error.as_str())
         {
             self.toast_error(error.clone());
-            // One unavailable track is Spotify's catalogue; several in a
-            // row is the session's audio-key service gone bad, which
-            // leaves librespot feeding the decoder encrypted bytes and
-            // skipping through the whole album. A fresh session cures it.
-            if error.starts_with("This item isn't available") {
-                let now = Instant::now();
-                self.unavailable_at
-                    .retain(|at| now.duration_since(*at) < Duration::from_secs(20));
-                self.unavailable_at.push(now);
-                if self.unavailable_at.len() >= 3
-                    && self
-                        .last_unavailable_reconnect
-                        .is_none_or(|at| at.elapsed() > Duration::from_secs(60))
-                {
-                    self.unavailable_at.clear();
-                    self.last_unavailable_reconnect = Some(now);
-                    self.backend.send(Command::Reconnect);
-                    self.toast("Spotify audio disconnected. Reconnecting local playback");
+            // One unavailable track is Spotify's catalogue, and a run of them
+            // is the session's audio-key service gone bad, which leaves
+            // librespot skipping through the whole album. A fresh session
+            // cures it.
+            //
+            // A refused key is that same fault stated outright — the engine
+            // stops rather than skipping, and nothing after it will play
+            // either — so it does not wait for a run to accumulate.
+            let now = Instant::now();
+            match state.failure {
+                Some(PlaybackFailure::AudioKeyRefused) => {
+                    self.reconnect_local(now);
                 }
+                Some(PlaybackFailure::Unavailable) => {
+                    self.unavailable_at
+                        .retain(|at| now.duration_since(*at) < Duration::from_secs(20));
+                    self.unavailable_at.push(now);
+                    if self.unavailable_at.len() >= 3 {
+                        self.reconnect_local(now);
+                    }
+                }
+                None => {}
             }
         }
         if let Some(seed) = autoplay_seed(
@@ -6580,6 +6614,7 @@ impl App {
                     &self.settings,
                     std::sync::Arc::clone(&self.winamp.tap),
                     std::sync::Arc::clone(&self.winamp.eq),
+                    std::sync::Arc::clone(&self.automix_view),
                 );
                 self.backend.send(Command::RestartEngine(config));
                 if self.local_ready {
@@ -7491,10 +7526,12 @@ pub fn engine_config(
     settings: &Settings,
     tap: std::sync::Arc<crate::vis::AudioTap>,
     eq: crate::eq::SharedEq,
+    automix_view: crate::automix_driver::SharedAutomixView,
 ) -> EngineConfig {
     EngineConfig {
         tap,
         eq,
+        automix_view,
         analysis: (settings.crossfade_seconds > 0)
             .then(|| crate::automix_track::Collector::new(crate::vis::SAMPLE_RATE)),
         device_name: settings.device_name.trim().to_string(),

@@ -99,7 +99,17 @@ pub const ROW_HEIGHT: f32 = 56.0;
 pub const COMPACT_ROW_HEIGHT: f32 = 48.0;
 /// The compact track list: one line, no cover.
 pub const THIN_ROW_HEIGHT: f32 = 36.0;
-pub const PLAYER_BAR_HEIGHT: f32 = 88.0;
+/// The now-playing bar, and the room the transition lane under its progress
+/// row is drawn in.
+///
+/// The cluster inside it (buttons and progress row) is centred on the bar's
+/// midline, and the lane that carries the incoming track's fade-in mark hangs
+/// below the progress row. That lane is the last thing in the panel, so the
+/// bar has to be tall enough to hold it: at 88 the lane cleared the panel's
+/// bottom edge by one pixel, which is a drawing that survives until anything
+/// above it moves and then is silently clipped. See
+/// `ui::player_bar::the_transition_lane_fits_inside_the_bar_it_is_drawn_in`.
+pub const PLAYER_BAR_HEIGHT: f32 = 92.0;
 /// The narrowest either right-hand panel goes. The queue and the lyrics
 /// take the same edge and swap places there, so a width that suits one
 /// has to suit the other, or the window would jump on the swap.
