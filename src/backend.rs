@@ -3264,6 +3264,7 @@ mod authorization_tests {
             &settings,
             crate::vis::AudioTap::new(),
             crate::eq::shared(),
+            crate::automix_driver::shared_view(),
         );
         let http = reqwest::Client::new();
         let art = ArtLoader::new(http.clone(), runtime.handle().clone(), dirs.art_cache_dir());
