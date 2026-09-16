@@ -5,8 +5,6 @@
 //! consistent.
 
 pub mod custom;
-#[cfg(target_os = "linux")]
-mod omarchy;
 
 use egui::{Color32, CornerRadius, Response, Sense, Stroke, Vec2};
 

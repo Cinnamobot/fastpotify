@@ -2538,16 +2538,6 @@ impl App {
             self.settings.custom_theme_cache = Some(theme.clone());
             changed = true;
         }
-        if self.custom_themes.follows_omarchy() {
-            if let Some(theme) = self.custom_themes.system_theme()
-                && self.settings.system_theme_cache.as_ref() != Some(theme)
-            {
-                self.settings.system_theme_cache = Some(theme.clone());
-                changed = true;
-            }
-        } else if self.settings.system_theme_cache.take().is_some() {
-            changed = true;
-        }
         if changed {
             self.mark_settings_dirty();
             ctx.set_theme(self.theme_preference());
@@ -11127,81 +11117,15 @@ mod tests {
     }
 
     #[test]
-    fn following_omarchy_is_automatic_live_and_never_overrides_an_explicit_choice() {
-        let mut app = test_app("system-omarchy");
-        app.backend.shutdown();
-        let ctx = egui::Context::default();
-        app.settings = Settings::default();
-        app.window_hidden = true;
-        app.resume_track = Some("spotify:track:playing".into());
-        app.resume_position_ms = 123_000;
-        let theme = theme::custom::CustomTheme {
-            filename: "omarchy.json".into(),
-            palette: Palette::light(),
-        };
-        app.custom_themes
-            .load_system_test(Some(theme.clone()), true);
-        wait_for_custom_themes(&mut app, &ctx);
-        app.apply_theme(&ctx);
-        assert_eq!(app.palette, theme.palette);
-        assert_eq!(app.settings.theme, ThemeChoice::System);
-        assert!(app.settings.custom_theme.is_none());
-        app.save_settings();
-        let saved = Settings::load(&app.dirs.settings_file());
-        assert_eq!(saved.cached_palette(), Some(theme.palette));
-
-        app.custom_themes.load_system_test(None, true);
-        wait_for_custom_themes(&mut app, &ctx);
-        app.apply_theme(&ctx);
-        assert_eq!(
-            app.palette, theme.palette,
-            "missing colours retain the last palette"
-        );
-        for (choice, expected) in [
-            (ThemeChoice::Dark, Palette::dark()),
-            (ThemeChoice::Light, Palette::light()),
-        ] {
-            app.apply(Action::SetTheme(choice), &ctx);
-            let mut updated = theme.clone();
-            updated.palette.accent = egui::Color32::RED;
-            app.custom_themes.load_system_test(Some(updated), true);
-            wait_for_custom_themes(&mut app, &ctx);
-            app.apply_theme(&ctx);
-            assert_eq!(app.palette, expected);
-        }
-        app.apply(Action::SetTheme(ThemeChoice::System), &ctx);
-        assert_eq!(app.palette.accent, egui::Color32::RED);
-        let custom = theme::custom::CustomTheme {
-            filename: "mine.json".into(),
-            palette: Palette::dark(),
-        };
-        app.custom_themes = theme::custom::Catalog::from_themes(vec![custom.clone()]);
-        app.apply(Action::SetCustomTheme(custom.filename.clone()), &ctx);
-        app.custom_themes.load_system_test(Some(theme), true);
-        wait_for_custom_themes(&mut app, &ctx);
-        app.apply_theme(&ctx);
-        assert_eq!(app.palette, custom.palette);
-        app.apply(Action::SetTheme(ThemeChoice::System), &ctx);
-        app.custom_themes.load_system_test(None, false);
-        wait_for_custom_themes(&mut app, &ctx);
-        assert!(app.settings.system_theme_cache.is_none());
-        assert_eq!(app.theme_preference(), egui::ThemePreference::System);
-        assert!(app.window_hidden);
-        assert_eq!(app.resume_track.as_deref(), Some("spotify:track:playing"));
-        assert_eq!(app.resume_position_ms, 123_000);
-        std::fs::remove_dir_all(app.dirs.config.parent().unwrap()).unwrap();
-    }
-
-    #[test]
     fn custom_theme_reload_updates_the_selected_palette_without_showing_the_window() {
         let mut app = test_app("custom-theme-reload");
         app.backend.shutdown();
         let ctx = egui::Context::default();
         let directory = app.dirs.config.join("themes");
-        let file = directory.join("omarchy.json");
+        let file = directory.join("gruvbox.json");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(&file, br#"{"base":"dark"}"#).unwrap();
-        app.settings.custom_theme = Some("omarchy.json".into());
+        app.settings.custom_theme = Some("gruvbox.json".into());
         app.load_custom_themes(&Waker::default());
         wait_for_custom_themes(&mut app, &ctx);
         app.apply_theme(&ctx);
@@ -11231,7 +11155,7 @@ mod tests {
             assert_eq!(app.settings.volume, 37);
             assert_eq!(app.resume_track.as_deref(), Some("spotify:track:playing"));
             assert_eq!(app.resume_position_ms, 123_000);
-            assert_eq!(app.settings.custom_theme.as_deref(), Some("omarchy.json"));
+            assert_eq!(app.settings.custom_theme.as_deref(), Some("gruvbox.json"));
         }
 
         app.apply(Action::SetTheme(ThemeChoice::Light), &ctx);

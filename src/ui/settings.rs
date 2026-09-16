@@ -665,8 +665,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .detail(app.settings.custom_theme.as_deref());
             if !detail.is_empty() {
                 detail.to_owned()
-            } else if app.custom_themes.follows_omarchy() {
-                "Follow system uses your Omarchy colours.".to_owned()
             } else {
                 "Follow system uses your desktop's light or dark appearance.".to_owned()
             }
@@ -706,7 +704,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             .settings
                             .custom_theme
                             .as_deref()
-                            .map(theme::custom::label)
                             .unwrap_or_else(|| app.settings.theme.label());
                         let response = egui::ComboBox::from_id_salt("appearance_theme")
                             .selected_text(selected)
@@ -724,15 +721,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                         app.actions.push(Action::SetTheme(choice));
                                     }
                                 }
-                                if app.custom_themes.picker_themes().next().is_some() {
+                                if !app.custom_themes.themes().is_empty() {
                                     ui.separator();
                                 }
-                                for theme in app.custom_themes.picker_themes() {
+                                for theme in app.custom_themes.themes() {
                                     if ui
                                         .selectable_label(
                                             app.settings.custom_theme.as_deref()
                                                 == Some(theme.filename.as_str()),
-                                            theme::custom::label(&theme.filename),
+                                            &theme.filename,
                                         )
                                         .clicked()
                                     {

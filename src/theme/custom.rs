@@ -15,14 +15,6 @@ pub struct CustomTheme {
     pub palette: Palette,
 }
 
-pub fn label(filename: &str) -> &str {
-    if filename == "omarchy.json" {
-        "Omarchy"
-    } else {
-        filename
-    }
-}
-
 /// A damaged optional cache must not make the rest of settings unreadable.
 pub fn read_cached_theme<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
@@ -149,8 +141,6 @@ fn read_theme(directory: &Path, filename: &str) -> Result<CustomTheme, String> {
 struct Loaded {
     themes: Vec<CustomTheme>,
     problem: Option<String>,
-    follows_omarchy: bool,
-    system_theme: Option<CustomTheme>,
 }
 
 fn discover(directory: &Path, selected: Option<&str>) -> Loaded {
@@ -229,23 +219,9 @@ pub struct Catalog {
     problem: Option<String>,
     receiver: Option<mpsc::Receiver<Loaded>>,
     pending: Option<Scan>,
-    follows_omarchy: bool,
-    system_theme: Option<CustomTheme>,
-    #[cfg(target_os = "linux")]
-    setup: Option<super::omarchy::Setup>,
-    #[cfg(target_os = "linux")]
-    setup_pending: bool,
 }
 
 impl Catalog {
-    /// Normal packaged launches may prepare the user's Omarchy integration.
-    /// Demo profiles and ordinary reloads never enable setup themselves.
-    #[cfg(target_os = "linux")]
-    pub fn enable_packaged_omarchy(&mut self) {
-        self.setup = super::omarchy::Setup::discover();
-        self.setup_pending = true;
-    }
-
     pub fn start(
         &mut self,
         directory: PathBuf,
@@ -265,29 +241,8 @@ impl Catalog {
     }
 
     fn scan(&mut self, scan: Scan) {
-        #[cfg(target_os = "linux")]
-        let setup = self.setup.clone();
-        #[cfg(target_os = "linux")]
-        let install = std::mem::take(&mut self.setup_pending);
         self.spawn(&scan.waker, move || {
-            #[cfg(target_os = "linux")]
-            if install
-                && let Some(setup) = &setup
-                && let Err(error) = setup.install(&scan.directory)
-            {
-                log::warn!("unable to prepare the optional Omarchy theme: {error}");
-            }
-            let loaded = discover(&scan.directory, scan.selected.as_deref());
-            #[cfg(target_os = "linux")]
-            let loaded = {
-                let mut loaded = loaded;
-                if setup.as_ref().is_some_and(|setup| setup.available()) {
-                    loaded.follows_omarchy = true;
-                    loaded.system_theme = read_theme(&scan.directory, "omarchy.json").ok();
-                }
-                loaded
-            };
-            loaded
+            discover(&scan.directory, scan.selected.as_deref())
         });
     }
 
@@ -321,30 +276,8 @@ impl Catalog {
         &self.themes
     }
 
-    /// Live Omarchy comes first on its desktop; other local palettes retain
-    /// their catalogue order. A leftover generated file is not a live option
-    /// when the integration is unavailable.
-    pub fn picker_themes(&self) -> impl Iterator<Item = &CustomTheme> {
-        self.themes
-            .iter()
-            .filter(|theme| self.follows_omarchy && theme.filename == "omarchy.json")
-            .chain(
-                self.themes
-                    .iter()
-                    .filter(|theme| theme.filename != "omarchy.json"),
-            )
-    }
-
     pub fn find(&self, filename: &str) -> Option<&CustomTheme> {
         self.themes.iter().find(|theme| theme.filename == filename)
-    }
-
-    pub fn follows_omarchy(&self) -> bool {
-        self.follows_omarchy
-    }
-
-    pub fn system_theme(&self) -> Option<&CustomTheme> {
-        self.system_theme.as_ref()
     }
 
     pub fn loading(&self) -> bool {
@@ -380,8 +313,6 @@ impl Catalog {
             Ok(loaded) => {
                 self.themes = loaded.themes;
                 self.problem = loaded.problem;
-                self.follows_omarchy = loaded.follows_omarchy;
-                self.system_theme = loaded.system_theme;
             }
             Err(mpsc::TryRecvError::Disconnected) => {
                 self.problem = Some(
@@ -392,25 +323,6 @@ impl Catalog {
             Err(mpsc::TryRecvError::Empty) => unreachable!("handled above"),
         }
         true
-    }
-
-    /// Deterministic theme menus for native demo captures, without desktop setup.
-    #[cfg(any(test, feature = "demo"))]
-    pub fn preview(themes: Vec<CustomTheme>, follows_omarchy: bool) -> Self {
-        let system_theme = follows_omarchy
-            .then(|| {
-                themes
-                    .iter()
-                    .find(|theme| theme.filename == "omarchy.json")
-                    .cloned()
-            })
-            .flatten();
-        Self {
-            themes,
-            follows_omarchy,
-            system_theme,
-            ..Self::default()
-        }
     }
 
     #[cfg(test)]
@@ -428,51 +340,10 @@ impl Catalog {
             ..Loaded::default()
         });
     }
-
-    #[cfg(test)]
-    pub(crate) fn load_system_test(&mut self, theme: Option<CustomTheme>, follows: bool) {
-        self.spawn(&crate::backend::Waker::default(), move || Loaded {
-            system_theme: theme,
-            follows_omarchy: follows,
-            ..Loaded::default()
-        });
-    }
 }
 
 #[cfg(test)]
 mod custom_theme_tests {
-    #[test]
-    fn picker_places_live_omarchy_first_only_when_the_integration_is_available() {
-        for available in [false, true] {
-            let catalog = super::Catalog::preview(
-                ["Catppuccin.json", "Tokyo Night.json", "omarchy.json"]
-                    .into_iter()
-                    .map(|filename| super::CustomTheme {
-                        filename: filename.into(),
-                        palette: super::Palette::dark(),
-                    })
-                    .collect(),
-                available,
-            );
-            let names: Vec<_> = catalog
-                .picker_themes()
-                .map(|theme| theme.filename.as_str())
-                .collect();
-            assert_eq!(
-                names,
-                if available {
-                    vec!["omarchy.json", "Catppuccin.json", "Tokyo Night.json"]
-                } else {
-                    vec!["Catppuccin.json", "Tokyo Night.json"]
-                }
-            );
-            assert!(
-                catalog.find("omarchy.json").is_some(),
-                "menu filtering must preserve cached selections"
-            );
-        }
-    }
-
     use super::*;
 
     #[test]

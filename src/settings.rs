@@ -133,13 +133,6 @@ pub struct Settings {
         skip_serializing_if = "Option::is_none"
     )]
     pub custom_theme_cache: Option<crate::theme::custom::CustomTheme>,
-    /// Last detected system palette, so following Omarchy survives a restart.
-    #[serde(
-        default,
-        deserialize_with = "crate::theme::custom::read_cached_theme",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub system_theme_cache: Option<crate::theme::custom::CustomTheme>,
     pub home: HomeSettings,
     /// Tint the interface with the colour of the playing album's art.
     pub accent_from_art: bool,
@@ -254,7 +247,6 @@ impl Default for Settings {
             theme: ThemeChoice::System,
             custom_theme: None,
             custom_theme_cache: None,
-            system_theme_cache: None,
             home: HomeSettings::default(),
             accent_from_art: true,
             volume: (u16::MAX as u32 * 70 / 100) as u16,
@@ -315,8 +307,6 @@ impl Settings {
     pub(crate) fn cached_palette(&self) -> Option<crate::theme::Palette> {
         let theme = if self.custom_theme.is_some() {
             self.custom_theme_cache.as_ref()
-        } else if self.theme == ThemeChoice::System {
-            self.system_theme_cache.as_ref()
         } else {
             None
         };
@@ -400,13 +390,6 @@ mod tests {
             assert_eq!(settings.theme, choice);
             assert_eq!(settings.volume, 37);
         }
-        let settings: Settings = serde_json::from_value(serde_json::json!({
-            "theme": "dark", "system_theme_cache": {"broken": true}, "volume": 37
-        }))
-        .unwrap();
-        assert!(settings.system_theme_cache.is_none());
-        assert_eq!(settings.theme, ThemeChoice::Dark);
-        assert_eq!(settings.volume, 37);
     }
 
     #[test]
