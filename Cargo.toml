@@ -157,6 +157,17 @@ include-po = "0.2"
 [dev-dependencies]
 # Exercise the same PO compiler used by build.rs with partial catalogs.
 polib = "0.3"
+# The offline automix harness (examples/automix_analyse.rs) decodes a real
+# track so the structure detector can be checked against real music rather
+# than synthetic material. Both are already in the tree as librespot's own
+# dependencies, so naming them adds no code to the build. No version is
+# given for either: `[patch.crates-io]` below already redirects librespot to
+# the fork, and a second requirement would resolve to a second copy of it.
+librespot-audio = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
+symphonia = { version = "0.5", default-features = false, features = ["ogg", "vorbis", "mp3"] }
+# Both probes drive a librespot future that can panic on a response shape it
+# does not expect, so the panic has to be caught and reported per track.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # The icon and version information Windows shows for the executable.
 [target.'cfg(windows)'.build-dependencies]
