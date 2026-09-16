@@ -38,6 +38,8 @@ use librespot_playback::{
 };
 use sha1::{Digest, Sha1};
 
+use crate::automix_cuepoints::{Cuepoints, Missing};
+
 use crate::api::models::ArtistRef;
 use crate::sink::{AudioControl, ErrorHook, RodioSink};
 use crate::vis::{AudioTap, Tapped};
@@ -66,6 +68,10 @@ pub struct EngineConfig {
     /// Collects the playing track for automix's beat analysis, when automix
     /// is on. `None` leaves the audio path untouched.
     pub analysis: Option<Arc<crate::automix_track::Collector>>,
+    /// What automix is holding, for the interface to draw. Shared rather than
+    /// queried because the engine that decides and the interface that shows
+    /// it are separate threads with no channel between them for this.
+    pub automix_view: crate::automix_driver::SharedAutomixView,
 }
 
 impl EngineConfig {
@@ -165,6 +171,23 @@ impl LocalTrack {
     }
 }
 
+/// Why the engine could not play what it was given.
+///
+/// Carried apart from the message, because the two call for different
+/// responses and a message is for reading, not for deciding on: the message
+/// wording is the interface's, and matching it was how the severity of an
+/// audio-key refusal came to be missed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PlaybackFailure {
+    /// Spotify has nothing at this URI — one track's problem, not the
+    /// session's.
+    Unavailable,
+    /// The session refused the audio key itself. The engine stops rather
+    /// than skipping, and every later track fails the same way: this is the
+    /// session, and only a fresh one clears it.
+    AudioKeyRefused,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct LocalState {
     pub playback: Playback,
@@ -182,6 +205,9 @@ pub struct LocalState {
     pub username: String,
     pub active_client: String,
     pub error: Option<String>,
+    /// What kind of failure `error` describes, for callers that have to act
+    /// on it rather than show it.
+    pub failure: Option<PlaybackFailure>,
     pub seek_sequence: u64,
 }
 
@@ -354,8 +380,13 @@ impl Engine {
             Arc::clone(&state),
             Arc::clone(&notify),
             Arc::clone(&audio),
-            crate::automix_driver::Automix::new(config.analysis.clone(), crate::vis::SAMPLE_RATE),
+            crate::automix_driver::Automix::new(
+                config.analysis.clone(),
+                crate::vis::SAMPLE_RATE,
+                config.automix_view.clone(),
+            ),
             Arc::clone(&player),
+            session.clone(),
         ));
 
         let connect_config = ConnectConfig {
@@ -728,9 +759,14 @@ async fn run_events(
     audio: Arc<AudioControl>,
     automix: Option<crate::automix_driver::Automix>,
     player: Arc<Player>,
+    session: Session,
 ) {
     let mut play_request_id = None;
     let mut automix = automix;
+    // The server's automix cuepoints, in flight and already held. Looked up
+    // per track rather than per pair, because the same track's answer serves
+    // both ends of every transition it takes part in.
+    let mut cuepoints = CuepointFetches::default();
     // Automix needs the track to have played a while before its grid exists,
     // so the check rides the same per-second position updates the interface
     // already receives rather than a timer of its own.
@@ -745,7 +781,33 @@ async fn run_events(
         if let (Some(current), Some(incoming)) = (play_request_id, event.get_play_request_id())
             && current != incoming
         {
+            // Dropped as belonging to another play request. Worth a line: a
+            // preload is answered under the request that asked for it, and one
+            // dropped here never becomes `Ready`.
+            log::debug!("automix: dropping {event:?}, it is for play request {incoming}, not {current}");
             continue;
+        }
+        // The preload handshake is the one thing automix cannot work without:
+        // no probe means no incoming grid, and no `Ready` means the player has
+        // nothing to mix in at the boundary. None of these events reach the
+        // interface, so without a line here a preload that never happens and
+        // one that is merely late look the same from the log.
+        match &event {
+            PlayerEvent::TimeToPreloadNextTrack { track_id, .. } => {
+                log::debug!("preload: the player asked for the next track ({track_id})")
+            }
+            PlayerEvent::UpcomingTrack { track_id } => {
+                log::debug!("preload: the queue names {track_id} as next")
+            }
+            PlayerEvent::Preloading { track_id } => {
+                log::debug!("preload: {track_id} is ready to mix in")
+            }
+            PlayerEvent::IncomingPreloaded { track_id, probe } => log::debug!(
+                "preload: {track_id} probed, {} samples from {:.1}s",
+                probe.samples.len(),
+                f64::from(probe.position_ms) / 1000.0
+            ),
+            _ => {}
         }
         match &event {
             PlayerEvent::TrackChanged { .. } => {
@@ -773,13 +835,40 @@ async fn run_events(
             _ => {}
         }
         if let Some(automix) = &mut automix {
-            if let PlayerEvent::IncomingPreloaded { probe, .. } = &event {
+            if let PlayerEvent::IncomingPreloaded { track_id, probe } = &event {
+                automix.set_incoming_track(track_id.clone());
                 automix.incoming(&crate::automix::Probe {
                     samples: probe.samples.clone(),
                     position_seconds: f64::from(probe.position_ms) / 1000.0,
                 });
             }
             drive_automix(automix, &player, &state, &event);
+        }
+        // The server's own automix cuepoints, as soon as the track they
+        // belong to is known. Each lookup is independent of the plan that
+        // uses it, so neither waits on the other: the playing track's is
+        // needed long before its own boundary, and the preloaded track's
+        // before the boundary it arrives at.
+        match &event {
+            PlayerEvent::TrackChanged { audio_item } => {
+                cuepoints.want(CuepointSlot::Playing, &audio_item.track_id);
+            }
+            // The queue names what follows as soon as a track starts, which
+            // is far earlier than the preload decides it. Looking it up here
+            // is what gives a manual skip an answer to use: a skip can be
+            // pressed at any moment, including at the very start of a track,
+            // and one that had to fetch first would either stall or fall back
+            // to playing the track from its first sample.
+            PlayerEvent::UpcomingTrack { track_id } => {
+                cuepoints.want(CuepointSlot::Incoming, track_id);
+            }
+            PlayerEvent::IncomingPreloaded { track_id, .. } => {
+                cuepoints.want(CuepointSlot::Incoming, track_id);
+            }
+            _ => {}
+        }
+        if let Some(automix) = automix.as_mut() {
+            cuepoints.collect(&session, automix);
         }
         let snapshot = {
             let mut current = state.lock().unwrap_or_else(|p| p.into_inner());
@@ -854,9 +943,259 @@ fn drive_automix(
             fade_in_at: Duration::from_secs_f64(planned.fade_in_at),
             tempo_rate: planned.tempo_ratio,
             curve: planned.curve,
+            // Named so the player can tell whether this plan still applies to
+            // the track a manual skip is about to start. Without the name, a
+            // skip would have no way to know the offset belongs to that
+            // track, and seeking a track to another track's offset lands
+            // nowhere near the music.
+            incoming_track: automix.incoming_track().cloned(),
         }
     });
     player.set_crossfade_plan(plan);
+}
+
+/// Which end of the coming pair a lookup is for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CuepointSlot {
+    /// The track that is playing, whose fade-out cue begins the overlap.
+    Playing,
+    /// The preloaded track, whose fade-in cue ends it.
+    Incoming,
+}
+
+/// One role's wish for a track.
+///
+/// The track is all that is kept: an answer is looked up by track, and the
+/// engine is told the same answer again on each pass rather than this
+/// remembering what it was told. That is harmless — the engine republishes
+/// the plan it holds along with the cue, so the write is idempotent — and it
+/// is one less thing that can disagree with the cache the answer came from.
+#[derive(Default)]
+struct Wanted {
+    /// The track this role needs an answer for.
+    track: Option<SpotifyUri>,
+}
+
+/// The cuepoint lookups this engine has going, and the answers it holds.
+///
+/// The service answers per *track*, not per role: a track's own fade-in and
+/// fade-out cues are the same pair whichever side of a transition it takes
+/// part in. So a track is looked up once and its answer serves every role it
+/// later takes — which is not what happened before this cache existed. A
+/// track was fetched as the incoming one while it was preloaded, and then
+/// fetched again the moment it started playing, because the two roles tracked
+/// their lookups separately and neither knew the other had already asked.
+/// That was two requests for one answer, on every track.
+#[derive(Default)]
+struct CuepointFetches {
+    playing: Wanted,
+    incoming: Wanted,
+    /// Lookups in flight, by track, so a track is asked for at most once.
+    pending: Vec<(
+        SpotifyUri,
+        tokio::sync::oneshot::Receiver<Result<Cuepoints, Missing>>,
+    )>,
+    /// Answers already fetched, and the tracks the service had nothing for.
+    /// Small: a pair needs two, and a back-skip reaches one more.
+    answers: Vec<(SpotifyUri, Option<Cuepoints>)>,
+    /// Lookups that did not complete, by track, with when they last failed
+    /// and how many times. Kept apart from `answers` so a failure is retried
+    /// instead of being remembered as the service having no cuepoints.
+    failed: Vec<(SpotifyUri, Instant, u32)>,
+}
+
+/// Tracks whose answers are kept. A transition needs the playing track and
+/// the incoming one, and a skip back needs the one that just left.
+const REMEMBERED_TRACKS: usize = 8;
+
+/// How many times a track's cuepoints are asked for before a failure is
+/// treated as the service not having them. A request that never succeeds is
+/// not worth asking for on every event; one that failed once is.
+const MAX_LOOKUP_TRIES: u32 = 3;
+
+/// How long to wait before asking again, by how many attempts have failed.
+///
+/// The first retry is quick, because the common failure is a moment's
+/// session trouble and the answer is needed before the boundary. Later ones
+/// back off so a service that is genuinely refusing is not hammered.
+fn retry_after(tries: u32) -> Duration {
+    match tries {
+        0 | 1 => Duration::from_secs(2),
+        2 => Duration::from_secs(10),
+        _ => Duration::from_secs(30),
+    }
+}
+
+impl CuepointFetches {
+    /// Records that a role needs an answer for `track`.
+    fn want(&mut self, slot: CuepointSlot, track: &SpotifyUri) {
+        let wanted = match slot {
+            CuepointSlot::Playing => &mut self.playing,
+            CuepointSlot::Incoming => &mut self.incoming,
+        };
+        if wanted.track.as_ref() == Some(track) {
+            return;
+        }
+        log::debug!(
+            "automix: {} now needs cuepoints for {track}",
+            match slot {
+                CuepointSlot::Playing => "the playing track",
+                CuepointSlot::Incoming => "the incoming track",
+            }
+        );
+        wanted.track = Some(track.clone());
+    }
+
+    /// The answer held for `track`, if one has been settled already.
+    ///
+    /// `Some(None)` means the service answered and has nothing for it, which
+    /// is an answer in its own right and must not be asked for again. A
+    /// lookup that *failed* is not held here at all: it says nothing about
+    /// the track, so treating it as an answer took the transition away for
+    /// the rest of the session.
+    fn answer_for(&self, track: &SpotifyUri) -> Option<Option<Cuepoints>> {
+        self.answers
+            .iter()
+            .rev()
+            .find(|(known, _)| known == track)
+            .map(|(_, answer)| *answer)
+    }
+
+    /// Whether `track` is worth asking for: nothing settled for it, none on
+    /// its way, and any earlier failure has had time to clear.
+    fn needs_lookup(&self, track: &SpotifyUri, now: Instant) -> bool {
+        self.answer_for(track).is_none()
+            && !self.pending.iter().any(|(asked, _)| asked == track)
+            && self
+                .failed
+                .iter()
+                .rev()
+                .find(|(known, _, _)| known == track)
+                .is_none_or(|(_, at, tries)| {
+                    now.duration_since(*at) >= retry_after(*tries) && *tries < MAX_LOOKUP_TRIES
+                })
+    }
+
+    fn remember(&mut self, track: SpotifyUri, answer: Option<Cuepoints>) {
+        self.answers.retain(|(known, _)| known != &track);
+        self.answers.push((track, answer));
+        if self.answers.len() > REMEMBERED_TRACKS {
+            self.answers.remove(0);
+        }
+    }
+
+    /// Records that a lookup failed, so it can be tried again later rather
+    /// than being remembered as "the service has nothing".
+    fn failed(&mut self, track: SpotifyUri) {
+        let tries = match self.failed.iter_mut().find(|(known, _, _)| *known == track) {
+            Some((_, at, tries)) => {
+                *at = Instant::now();
+                *tries += 1;
+                *tries
+            }
+            None => {
+                self.failed.push((track, Instant::now(), 1));
+                1
+            }
+        };
+        log::debug!("automix: cuepoint lookup for that track failed {tries} time(s); will retry");
+        if self.failed.len() > REMEMBERED_TRACKS {
+            self.failed.remove(0);
+        }
+    }
+
+    /// Files what a lookup came back with.
+    ///
+    /// This is the decision that matters, so it lives in one place: an answer
+    /// is remembered and a failure is not. Remembering a failure would make it
+    /// final — the track would never be asked for again — which is the bug
+    /// this separates the two for.
+    fn record(&mut self, track: SpotifyUri, result: Result<Cuepoints, Missing>) {
+        match result {
+            Ok(cue) => {
+                log::debug!(
+                    "automix: cuepoints for {track}: in {:.2}s out {:.2}s {:.2} BPM",
+                    cue.fade_in_at,
+                    cue.fade_out_at,
+                    cue.bpm
+                );
+                self.remember(track, Some(cue));
+            }
+            Err(Missing::NoCuepoints) => {
+                log::debug!("automix: the service has no cuepoints for {track}");
+                self.remember(track, None);
+            }
+            Err(Missing::Failed) => self.failed(track),
+        }
+    }
+
+    /// Reads whatever has arrived, tells the engine what each role needs, and
+    /// starts the lookups that are still missing.
+    ///
+    /// Called on every event. Nothing here waits: a request that has not come
+    /// back is left for a later pass, and the player emits events several
+    /// times a second, so an answer lands well before the boundary it is for.
+    fn collect(&mut self, session: &Session, automix: &mut crate::automix_driver::Automix) {
+        use tokio::sync::oneshot::error::TryRecvError;
+        let mut index = 0;
+        while index < self.pending.len() {
+            match self.pending[index].1.try_recv() {
+                Ok(result) => {
+                    let (track, _) = self.pending.remove(index);
+                    self.record(track, result);
+                }
+                Err(TryRecvError::Empty) => index += 1,
+                Err(TryRecvError::Closed) => {
+                    // The task went away without answering, which is a
+                    // failure like any other rather than an answer.
+                    let (track, _) = self.pending.remove(index);
+                    self.record(track, Err(Missing::Failed));
+                }
+            }
+        }
+
+        let now = Instant::now();
+        for slot in [CuepointSlot::Playing, CuepointSlot::Incoming] {
+            let wanted = match slot {
+                CuepointSlot::Playing => &self.playing,
+                CuepointSlot::Incoming => &self.incoming,
+            };
+            let Some(track) = wanted.track.clone() else {
+                continue;
+            };
+            if let Some(answer) = self.answer_for(&track) {
+                // The name goes first, always. The engine keys its cuepoints
+                // by the track they belong to, so a cue that arrives before
+                // the name it belongs to is dropped — which is exactly what
+                // happened when the queue named the next track early: its
+                // answer came back while the engine still had no idea which
+                // track that was, and the cue was discarded as a mismatch.
+                match slot {
+                    CuepointSlot::Playing => automix.set_playing_cuepoints(&track, answer),
+                    CuepointSlot::Incoming => {
+                        automix.set_incoming_track(track.clone());
+                        automix.set_incoming_cuepoints(&track, answer)
+                    }
+                }
+                continue;
+            }
+            if !self.needs_lookup(&track, now) {
+                continue;
+            }
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let session = session.clone();
+            let asked = track.clone();
+            // Spawned rather than awaited: this runs on the task that also
+            // arms transitions, and a network round trip in the middle of it
+            // would put the lookup's own latency between an event and the
+            // plan that uses it.
+            tokio::spawn(async move {
+                let answer = crate::automix_cuepoints::Cuepoints::fetch(&session, &asked).await;
+                let _ = sender.send(answer);
+            });
+            self.pending.push((track, receiver));
+        }
+    }
 }
 
 fn set<T: PartialEq>(target: &mut T, value: T) -> bool {
@@ -866,6 +1205,17 @@ fn set<T: PartialEq>(target: &mut T, value: T) -> bool {
         *target = value;
         true
     }
+}
+
+/// Clears the failure and its message together.
+///
+/// The two are one piece of state: a caller acting on `failure` must not see
+/// a kind left over from a failure that is already over, so every site that
+/// clears the message clears the kind with it. Doing it here rather than at
+/// each site is what keeps them from drifting apart.
+fn clear_failure(error: &mut Option<String>, failure: &mut Option<PlaybackFailure>) -> bool {
+    let changed = set(error, None);
+    changed | set(failure, None)
 }
 
 fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
@@ -884,7 +1234,7 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
             };
             changed |= set(&mut state.position_ms, position_ms);
             changed |= set(&mut state.position_at, None);
-            changed |= set(&mut state.error, None);
+            changed |= clear_failure(&mut state.error, &mut state.failure);
             changed
         }
         PlayerEvent::Playing { position_ms, .. } => {
@@ -917,20 +1267,26 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
         }
         PlayerEvent::TrackChanged { audio_item } => {
             let mut changed = set(&mut state.track, Some(local_track(&audio_item)));
-            changed |= set(&mut state.error, None);
+            changed |= clear_failure(&mut state.error, &mut state.failure);
             changed
         }
-        PlayerEvent::Unavailable { track_id, .. } => set(
-            &mut state.error,
-            Some(format!(
-                "This item isn't available: {}",
-                track_id.to_uri().unwrap_or_default()
-            )),
-        ),
-        PlayerEvent::AudioKeyUnavailable { .. } => set(
-            &mut state.error,
-            Some("Spotify refused the audio key. Try again later".into()),
-        ),
+        PlayerEvent::Unavailable { track_id, .. } => {
+            state.failure = Some(PlaybackFailure::Unavailable);
+            set(
+                &mut state.error,
+                Some(format!(
+                    "This item isn't available: {}",
+                    track_id.to_uri().unwrap_or_default()
+                )),
+            )
+        }
+        PlayerEvent::AudioKeyUnavailable { .. } => {
+            state.failure = Some(PlaybackFailure::AudioKeyRefused);
+            set(
+                &mut state.error,
+                Some("Spotify refused the audio key. Try again later".into()),
+            )
+        }
         PlayerEvent::VolumeChanged { volume } => set(&mut state.volume, volume),
         PlayerEvent::SessionConnected { user_name, .. } => {
             let mut changed = set(&mut state.connected, true);
@@ -960,6 +1316,7 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
         | PlayerEvent::TimeToPreloadNextTrack { .. }
         | PlayerEvent::EndOfTrack { .. }
         | PlayerEvent::PlayRequestIdChanged { .. }
+        | PlayerEvent::UpcomingTrack { .. }
         | PlayerEvent::AutoPlayChanged { .. }
         | PlayerEvent::FilterExplicitContentChanged { .. } => false,
     }
@@ -1134,10 +1491,160 @@ fn decode_folder_name(encoded: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// The bug this covers: a skip always interrupted the audio path, which
-    /// faded the queue out and rebuilt the output. A crossfade is a mix of
-    /// the two tracks, so interrupting it threw the mix away and the skip was
-    /// heard as a cut. The interrupt is only correct when nothing overlaps.
+    /// The bug this covers: a track's cuepoints were looked up once as the
+    /// incoming track and again as the playing track, because the two roles
+    /// kept their lookups apart and neither knew the other had asked. The
+    /// service answers per track, so that was two requests for one answer on
+    /// every track.
+    #[test]
+    fn a_track_is_asked_for_once_however_many_roles_need_it() {
+        use super::{CuepointFetches, CuepointSlot};
+        use librespot_core::SpotifyUri;
+
+        let now = std::time::Instant::now();
+        let track = SpotifyUri::from_uri("spotify:track:4uLU6hMCjMI75M1A2tKUQC").expect("a uri");
+        let mut fetches = CuepointFetches::default();
+
+        // Nothing is held for it yet, so it must be looked up.
+        assert!(fetches.needs_lookup(&track, now));
+        // Once its answer is in, the other role's need is already satisfied.
+        fetches.remember(track.clone(), None);
+        assert!(
+            !fetches.needs_lookup(&track, now),
+            "an answer is held, so no second request is made"
+        );
+        assert_eq!(
+            fetches.answer_for(&track),
+            Some(None),
+            "and 'the service has nothing' is itself an answer, not a miss"
+        );
+
+        // Both roles can name it without asking again.
+        fetches.want(CuepointSlot::Incoming, &track);
+        fetches.want(CuepointSlot::Playing, &track);
+        assert!(!fetches.needs_lookup(&track, now));
+    }
+
+    /// The remembered answers are bounded: a long queue must not grow them
+    /// without end, and only the most recent tracks are worth keeping.
+    #[test]
+    fn remembered_answers_are_bounded_and_recent() {
+        use super::{CuepointFetches, REMEMBERED_TRACKS};
+        let mut fetches = CuepointFetches::default();
+        let tracks: Vec<_> = (0..REMEMBERED_TRACKS + 4)
+            .map(|index| format!("spotify:track:{index:022}"))
+            .collect();
+        for track in &tracks {
+            let uri = librespot_core::SpotifyUri::from_uri(track).expect("a uri");
+            fetches.remember(uri, None);
+        }
+        let oldest = librespot_core::SpotifyUri::from_uri(&tracks[0]).expect("a uri");
+        let newest =
+            librespot_core::SpotifyUri::from_uri(tracks.last().unwrap()).expect("a uri");
+        assert!(
+            fetches.answer_for(&oldest).is_none(),
+            "the oldest answers are dropped once the cache is full"
+        );
+        assert!(fetches.answer_for(&newest).is_some());
+    }
+
+    /// A role naming a different track must be able to ask for it, or a skip
+    /// would leave the new track with the previous track's cues.
+    #[test]
+    fn naming_a_new_track_reopens_the_question() {
+        use super::{CuepointFetches, CuepointSlot};
+        let first = "spotify:track:4uLU6hMCjMI75M1A2tKUQC";
+        let second = "spotify:track:0aaKu1ym6qIuoIOsTH8uij";
+        let first = librespot_core::SpotifyUri::from_uri(first).expect("a uri");
+        let second = librespot_core::SpotifyUri::from_uri(second).expect("a uri");
+
+        let now = std::time::Instant::now();
+        let mut fetches = CuepointFetches::default();
+        fetches.want(CuepointSlot::Playing, &first);
+        fetches.remember(first, None);
+        assert!(!fetches.needs_lookup(&fetches.playing.track.clone().expect("named"), now));
+
+        fetches.want(CuepointSlot::Playing, &second);
+        assert!(
+            fetches.needs_lookup(&second, now),
+            "the new track has not been asked for, so it must be"
+        );
+    }
+
+    /// The bug this covers: a lookup that failed was filed as "the service
+    /// has nothing", so the track was never asked for again and its transition
+    /// was taken away for the rest of the session. The two are different
+    /// answers and only one of them is final.
+    ///
+    /// Driven through `record`, which is what the collection loop calls, so
+    /// this pins the decision rather than the helper underneath it.
+    #[test]
+    fn a_failed_lookup_is_retried_rather_than_remembered_as_no_answer() {
+        use super::{CuepointFetches, MAX_LOOKUP_TRIES, Missing};
+        let track = librespot_core::SpotifyUri::from_uri("spotify:track:4uLU6hMCjMI75M1A2tKUQC")
+            .expect("a uri");
+        let mut fetches = CuepointFetches::default();
+        let at = std::time::Instant::now();
+
+        fetches.record(track.clone(), Err(Missing::Failed));
+        assert_eq!(
+            fetches.answer_for(&track),
+            None,
+            "a failure says nothing about the track, so it is not an answer"
+        );
+        assert!(
+            !fetches.needs_lookup(&track, at),
+            "and it must not be asked for again on the same event"
+        );
+        assert!(
+            fetches.needs_lookup(&track, at + std::time::Duration::from_secs(60)),
+            "but the track is still worth asking for once the failure has aged"
+        );
+
+        // A track the service genuinely has nothing for is settled, and stays
+        // settled: asking again would be a request spent on a known answer.
+        let settled = librespot_core::SpotifyUri::from_uri("spotify:track:0aaKu1ym6qIuoIOsTH8uij")
+            .expect("a uri");
+        fetches.record(settled.clone(), Err(Missing::NoCuepoints));
+        assert_eq!(
+            fetches.answer_for(&settled),
+            Some(None),
+            "an answer of 'nothing' is an answer"
+        );
+        assert!(
+            !fetches.needs_lookup(&settled, at + std::time::Duration::from_secs(600)),
+            "and it is final however long it has been held"
+        );
+
+        // An answer that arrives is held, and told to no one more than once
+        // per pass is the engine's business; this only checks it is kept.
+        let answered =
+            librespot_core::SpotifyUri::from_uri("spotify:track:2tak3H7HGKtRsAmEcLc1VO")
+                .expect("a uri");
+        fetches.record(
+            answered.clone(),
+            Ok(crate::automix_cuepoints::Cuepoints {
+                fade_in_at: 12.0,
+                fade_out_at: 180.0,
+                bpm: 128.0,
+            }),
+        );
+        assert_eq!(
+            fetches.answer_for(&answered).flatten().map(|cue| cue.bpm),
+            Some(128.0)
+        );
+
+        // A service that keeps refusing is not asked forever.
+        for _ in 0..MAX_LOOKUP_TRIES {
+            fetches.record(track.clone(), Err(Missing::Failed));
+        }
+        assert!(
+            !fetches.needs_lookup(&track, at + std::time::Duration::from_secs(600)),
+            "after the retries are spent it is treated as unresolvable"
+        );
+    }
+
+    /// A crossfaded skip is not interrupted, and a skip with no overlap is.
     #[test]
     fn a_crossfaded_skip_is_not_interrupted() {
         use super::{PlayerCommand, skip_is_mixed};
@@ -1432,6 +1939,7 @@ mod tests {
             tap: AudioTap::new(),
             eq: crate::eq::shared(),
             analysis: None,
+            automix_view: crate::automix_driver::shared_view(),
             device_name: "Fastpotify".into(),
             bitrate_kbps: 320,
             normalisation: false,
