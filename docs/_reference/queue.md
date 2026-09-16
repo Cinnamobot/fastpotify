@@ -30,6 +30,12 @@ never becomes the beginning. This keeps the full Spotify playlist context;
 the app does not replace it with a shortened list of loaded songs. A request
 waiting for local playback to reconnect keeps the song chosen at the click.
 
+Sorted and filtered views omit unavailable songs and local files from their
+playback requests. The displayed rows keep their positions, and selecting a
+repeated song starts that occurrence. A filtered playlist or Liked Songs view
+plays its matching songs in displayed order, including duplicates. An empty or entirely
+unplayable view disables Play instead of starting the unfiltered context.
+
 1. **The list shows the play order.** The top row plays next, followed by the
    rows below it.
 
@@ -59,14 +65,19 @@ waiting for local playback to reconnect keeps the song chosen at the click.
    below stay. It only shows while this computer is the player, because
    that is the only queue the app can actually clear.
 
-8. **Changes appear immediately.** Fastpotify updates the queue before Spotify
+8. **Changes appear immediately.** Spotifast updates the queue before Spotify
    confirms the change. For local playback, it updates its own player directly.
    Toggling shuffle rechecks the queue so the new playback order appears
    promptly without waiting for the song to finish.
 
-9. **Closing the app keeps the queue.** Fastpotify saves it locally. When you
+9. **Closing the app keeps the queue.** Spotifast saves it locally. When you
    resume the last song, it restores your queued songs and playlist position.
 
 10. **Old answers from Spotify are ignored.** Queue responses can be a few
-    seconds late. Fastpotify ignores stale responses and asks again. Your
+    seconds late. Spotifast ignores stale responses and asks again. Your
     changes stay visible while it waits for confirmation.
+
+On `main`, after 0.7.1, selecting several playlist rows and choosing
+**Add to queue** preserves repeated occurrences in their selected order.
+For example, selecting B, C, B adds all three rows. A repeated click still
+counts once, and the notification reports only the rows actually added.

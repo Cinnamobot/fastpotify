@@ -248,10 +248,13 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                     .collect();
 
                 let max_height = (position.y - ctx.content_rect().top() - 62.0).clamp(52.0, 416.0);
-                egui::ScrollArea::vertical()
-                    .id_salt("connect-device-list")
-                    .max_height(max_height)
-                    .show(ui, |ui| {
+                crate::autoscroll::show(
+                    ui,
+                    egui::ScrollArea::vertical()
+                        .id_salt("connect-device-list")
+                        .max_height(max_height),
+                    egui::Vec2b::new(false, true),
+                    |ui| {
                         if !app.local_ready {
                             enable_playback_row(app, ui);
                         }
@@ -337,7 +340,8 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                         for receiver in &waiting {
                             receiver_row(app, ui, receiver);
                         }
-                    });
+                    },
+                );
             });
         });
     let popup_rect = area.response.rect;

@@ -26,6 +26,7 @@ use crate::images::{ArtLoader, accent_color};
 use crate::model::PlaylistCache;
 use crate::paths::AppDirs;
 use crate::player::{Engine, EngineConfig, EngineEvent, LoadSpec, LocalState, PlayerCommand};
+use crate::session_reads;
 
 pub type ApiResult<T> = Result<T, ApiError>;
 
@@ -212,6 +213,7 @@ pub enum ApiRequest {
     AlbumTracks {
         id: String,
         offset: u32,
+        generation: u64,
     },
     Show {
         id: String,
@@ -421,6 +423,7 @@ pub enum ApiResponse {
     AlbumTracks {
         id: String,
         offset: u32,
+        generation: u64,
         result: ApiResult<Page<Track>>,
     },
     Show {
@@ -455,6 +458,7 @@ pub enum ApiResponse {
 }
 
 pub enum Command {
+    OpenThemesFolder,
     CredentialsRestored {
         slot: CredentialSlot,
         lease: CredentialLease,
@@ -710,6 +714,8 @@ pub struct Backend {
     #[cfg(test)]
     playlist_add_requests: std::sync::Mutex<Vec<ApiRequest>>,
     #[cfg(test)]
+    remote_play_requests: std::sync::Mutex<Vec<ApiRequest>>,
+    #[cfg(test)]
     album_type_requests: std::sync::Mutex<Vec<Vec<String>>>,
 }
 
@@ -779,6 +785,8 @@ impl Backend {
             #[cfg(test)]
             playlist_add_requests: std::sync::Mutex::new(Vec::new()),
             #[cfg(test)]
+            remote_play_requests: std::sync::Mutex::new(Vec::new()),
+            #[cfg(test)]
             album_type_requests: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -816,7 +824,22 @@ impl Backend {
         #[cfg(test)]
         if matches!(
             request,
-            ApiRequest::AddToPlaylist { .. } | ApiRequest::CheckPlaylistDuplicates { .. }
+            ApiRequest::Remote {
+                action: RemoteAction::Play,
+                ..
+            } | ApiRequest::ShufflePlay { .. }
+        ) {
+            self.remote_play_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(request.clone());
+        }
+        #[cfg(test)]
+        if matches!(
+            request,
+            ApiRequest::AddToPlaylist { .. }
+                | ApiRequest::CheckPlaylistDuplicates { .. }
+                | ApiRequest::UpdatePlaylist { .. }
         ) {
             self.playlist_add_requests
                 .lock()
@@ -875,6 +898,16 @@ impl Backend {
         std::mem::take(
             &mut *self
                 .playlist_add_requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    #[cfg(test)]
+    pub fn take_remote_play_requests(&self) -> Vec<ApiRequest> {
+        std::mem::take(
+            &mut *self
+                .remote_play_requests
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         )
@@ -1088,6 +1121,21 @@ impl Worker {
     async fn run(&mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
         while let Some(command) = commands.recv().await {
             match command {
+                Command::OpenThemesFolder => {
+                    let directory = self.dirs.config.join("themes");
+                    let events = self.events.clone();
+                    let waker = self.waker.clone();
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(error) = std::fs::create_dir_all(&directory)
+                            .and_then(|()| crate::opener::open(&directory))
+                        {
+                            let _ = events.send(Event::Error(format!(
+                                "Couldn't open the themes folder: {error}"
+                            )));
+                            waker.wake();
+                        }
+                    });
+                }
                 Command::CredentialsRestored {
                     slot,
                     lease,
@@ -2150,7 +2198,7 @@ impl Worker {
                 if !lease.current() {
                     return Err("Sign-in changed before receiver activation.".into());
                 }
-                crate::zeroconf::add_user(&http, &receiver, &info, &credentials, "Fastpotify")
+                crate::zeroconf::add_user(&http, &receiver, &info, &credentials, "Spotifast")
                     .map_err(|error| error.to_string())
             })();
             let _ = events.send(Event::ReceiverActivated { name, result });
@@ -2356,7 +2404,7 @@ impl Worker {
             total: Some(total),
             next_offset,
         };
-        if let Err(error) = write_cached_playlist(&path, &cached).await {
+        if let Err(error) = write_cached_playlist(path.clone(), cached).await {
             log::warn!("unable to store playlist cache {}: {error}", path.display());
         }
     }
@@ -2371,7 +2419,7 @@ impl Worker {
         let waker = self.waker.clone();
         tokio::spawn(async move {
             for id in ids {
-                let name = engine.user_display_name(&id).await;
+                let name = session_reads::user_display_name(engine.session(), &id).await;
                 let _ = events.send(Event::UserName { id, name });
                 waker.wake();
             }
@@ -2418,6 +2466,7 @@ impl Worker {
         let personal_lease = self.credentials.lease(CredentialSlot::Personal);
         let background_api = Arc::clone(&self.background_api);
         let background = request.background();
+        let engine = self.engine.clone();
         let commands = self.commands.clone();
         let mut session = self.session.subscribe();
         let generation = *session.borrow_and_update();
@@ -2430,7 +2479,7 @@ impl Worker {
                     } else {
                         None
                     };
-                    handle(&api, request).await
+                    handle(&api, engine.as_deref(), request).await
                 } => result,
             };
             // Apply completion on the command loop. A late response cannot
@@ -2601,8 +2650,25 @@ fn observe_playlists(api: &ApiGateway, response: &ApiResponse) {
     }
 }
 
-async fn handle(api: &ApiGateway, request: ApiRequest) -> (ApiResponse, Option<ApiSource>) {
-    let selected = api.client_for(operation_for(api, &request)).await;
+async fn handle(
+    api: &ApiGateway,
+    engine: Option<&Engine>,
+    request: ApiRequest,
+) -> (ApiResponse, Option<ApiSource>) {
+    let operation = operation_for(api, &request);
+    // A session whose long-lived connection has dropped still answers over
+    // its HTTP client, so the engine's presence is the only liveness test;
+    // a read the session truly cannot make falls back to the Web API below.
+    if api.session_serves(operation)
+        && let Some(engine) = engine
+            .filter(|engine| same_account(&engine.session().username(), api.account().as_ref()))
+        && let Some(response) = over_session(engine, &request).await
+    {
+        log::debug!("Spotify route operation={operation:?} source=session");
+        observe_playlists(api, &response);
+        return (response, None);
+    }
+    let selected = api.client_for(operation).await;
     let expired = std::cell::Cell::new(None);
     macro_rules! routed {
         ($method:ident($($argument:expr),* $(,)?)) => {{
@@ -2858,7 +2924,12 @@ async fn handle(api: &ApiGateway, request: ApiRequest) -> (ApiResponse, Option<A
             result: routed!(album(&id)),
             id,
         },
-        ApiRequest::AlbumTracks { id, offset } => ApiResponse::AlbumTracks {
+        ApiRequest::AlbumTracks {
+            id,
+            offset,
+            generation,
+        } => ApiResponse::AlbumTracks {
+            generation,
             result: routed!(album_tracks(&id, offset, 50)),
             id,
             offset,
@@ -2930,6 +3001,122 @@ async fn handle(api: &ApiGateway, request: ApiRequest) -> (ApiResponse, Option<A
     (response, expired.get())
 }
 
+/// Whether a session signed in as `username` answers for the Web API's
+/// account. Local playback is approved separately, and another account's
+/// view of a playlist is not this one's.
+fn same_account(username: &str, account: Option<&AccountId>) -> bool {
+    account.is_some_and(|account| account.as_str() == username)
+}
+
+/// How long a session read may take before the Web API is asked instead:
+/// what the Web API's own requests get. A stalled line otherwise waits on
+/// the operating system, which is far longer than a page should spin.
+const SESSION_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Answers a playlist read over the streaming session. `None` when the
+/// session could not, leaving the request to the Web API.
+async fn over_session(engine: &Engine, request: &ApiRequest) -> Option<ApiResponse> {
+    let session = engine.session();
+    let read = async {
+        Some(match session_read(request)? {
+            SessionRead::Header { id } => {
+                SessionAnswer::Header(settle(session_reads::playlist(session, id).await)?)
+            }
+            SessionRead::Rows { id, offset } => SessionAnswer::Rows(settle(
+                session_reads::items(session, id, offset, PLAYLIST_PAGE_SIZE).await,
+            )?),
+            SessionRead::Sample { id, offset } => SessionAnswer::Rows(settle(
+                session_reads::sample(session, id, offset, PLAYLIST_PAGE_SIZE).await,
+            )?),
+        })
+    };
+    let Ok(answer) = tokio::time::timeout(SESSION_READ_TIMEOUT, read).await else {
+        log::debug!("session read timed out; asking the Web API");
+        return None;
+    };
+    session_response(request, answer?)
+}
+
+/// The read a request asks of the session: a playlist's header, a page of
+/// its rows, or a sample of who added them, which needs no song details.
+/// Anything else, a duplicate check among them, is the Web API's even
+/// where the session serves the operation.
+#[derive(Debug, PartialEq)]
+enum SessionRead<'a> {
+    Header { id: &'a str },
+    Rows { id: &'a str, offset: u32 },
+    Sample { id: &'a str, offset: u32 },
+}
+
+fn session_read(request: &ApiRequest) -> Option<SessionRead<'_>> {
+    Some(match request {
+        ApiRequest::Playlist { id, .. } => SessionRead::Header { id },
+        ApiRequest::PlaylistItems { id, offset, .. } => SessionRead::Rows {
+            id,
+            offset: *offset,
+        },
+        ApiRequest::PlaylistSample { id, offset, .. } => SessionRead::Sample {
+            id,
+            offset: *offset,
+        },
+        _ => return None,
+    })
+}
+
+/// What the session read: a playlist's header, or a page of its rows.
+enum SessionAnswer {
+    Header(ApiResult<Playlist>),
+    Rows(ApiResult<Page<PlaylistItem>>),
+}
+
+/// The response a session answer becomes, carrying the request's own id,
+/// offset, and generation so the app matches it to the page that asked.
+fn session_response(request: &ApiRequest, answer: SessionAnswer) -> Option<ApiResponse> {
+    Some(match (request, answer) {
+        (ApiRequest::Playlist { id, generation }, SessionAnswer::Header(result)) => {
+            ApiResponse::Playlist {
+                id: id.clone(),
+                generation: *generation,
+                result,
+            }
+        }
+        (
+            ApiRequest::PlaylistItems {
+                id,
+                offset,
+                generation,
+            },
+            SessionAnswer::Rows(result),
+        ) => ApiResponse::PlaylistItems {
+            id: id.clone(),
+            offset: *offset,
+            generation: *generation,
+            result,
+        },
+        (ApiRequest::PlaylistSample { id, generation, .. }, SessionAnswer::Rows(result)) => {
+            ApiResponse::PlaylistSample {
+                id: id.clone(),
+                generation: *generation,
+                result,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// A session answer as the Web API would have given it. A final refusal is
+/// shown as such; a dropped line leaves the Web API to try.
+fn settle<T>(result: Result<T, session_reads::Failure>) -> Option<ApiResult<T>> {
+    match result {
+        Ok(value) => Some(Ok(value)),
+        Err(session_reads::Failure::Definitive(error)) => Some(Err(error)),
+        Err(session_reads::Failure::Retry(error)) => {
+            log::debug!("session read failed: {error}; asking the Web API");
+            None
+        }
+    }
+}
+
 /// Spotify's transcription of the track, when the local session can ask for
 /// one. Answers are cached like LRCLIB's, "none" included; `None` falls
 /// back to LRCLIB.
@@ -2970,16 +3157,40 @@ struct CachedPlaylist {
 }
 
 async fn write_cached_playlist(
+    path: std::path::PathBuf,
+    cached: CachedPlaylist,
+) -> std::io::Result<()> {
+    // Move the checkpoint into the file worker without another model clone.
+    // Awaiting it preserves checkpoint order, including after playlist edits.
+    tokio::task::spawn_blocking(move || write_cached_playlist_file(&path, &cached))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
+fn write_cached_playlist_file(
     path: &std::path::Path,
     cached: &CachedPlaylist,
 ) -> std::io::Result<()> {
+    use std::io::Write;
+
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        std::fs::create_dir_all(parent)?;
     }
-    let text = serde_json::to_vec(cached).map_err(std::io::Error::other)?;
     let temporary = path.with_extension("json.tmp");
-    tokio::fs::write(&temporary, text).await?;
-    crate::util::replace_file(&temporary, path)
+    let file = std::fs::File::create(&temporary)?;
+    let result = (|| {
+        // Buffer small serializer writes without retaining the whole JSON file.
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut writer, cached).map_err(std::io::Error::other)?;
+        writer.flush()?;
+        // Windows requires the temporary file to be closed before replacement.
+        drop(writer);
+        crate::util::replace_file(&temporary, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -3100,6 +3311,7 @@ mod album_type_lookup_tests {
 #[cfg(test)]
 mod playlist_cache_tests {
     use super::{CachedPlaylist, write_cached_playlist};
+    use crate::api::models::{PlayableItem, PlaylistItem, Track};
 
     #[test]
     fn the_original_complete_cache_format_remains_readable() {
@@ -3126,10 +3338,10 @@ mod playlist_cache_tests {
             next_offset: Some(500),
         };
 
-        write_cached_playlist(&path, &cached("first"))
+        write_cached_playlist(path.clone(), cached("first"))
             .await
             .unwrap();
-        write_cached_playlist(&path, &cached("second"))
+        write_cached_playlist(path.clone(), cached("second"))
             .await
             .unwrap();
 
@@ -3138,6 +3350,92 @@ mod playlist_cache_tests {
         assert_eq!(stored.snapshot, "second");
         assert!(!path.with_extension("json.tmp").exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn streaming_preserves_the_cache_bytes_and_duplicate_unavailable_rows() {
+        let root = std::env::temp_dir().join(format!(
+            "fastpotify-playlist-cache-stream-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path = root.join("playlist.json");
+        let song = PlayableItem::Track(Track {
+            uri: "spotify:track:duplicate".into(),
+            name: "Song with \"quotes\", newlines\nand 日本語".into(),
+            is_playable: Some(false),
+            ..Track::default()
+        });
+        let rows = [
+            PlaylistItem {
+                item: Some(song.clone()),
+                ..PlaylistItem::default()
+            },
+            PlaylistItem {
+                track: Some(song),
+                ..PlaylistItem::default()
+            },
+            PlaylistItem::default(),
+        ];
+        let cached = CachedPlaylist {
+            snapshot: "unchanged-snapshot".into(),
+            items: (0..500).flat_map(|_| rows.clone()).collect(),
+            total: Some(2_000),
+            next_offset: Some(1_500),
+        };
+        let expected = serde_json::to_vec(&cached).unwrap();
+        assert!(
+            expected.len() > 64 * 1024,
+            "exercise multiple buffer flushes"
+        );
+
+        write_cached_playlist(path.clone(), cached).await.unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(bytes, expected, "existing readers see the identical format");
+        let restored: CachedPlaylist = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored.items.len(), 1_500);
+        for chunk in restored.items.chunks(3) {
+            assert_eq!(chunk, rows);
+        }
+        assert_eq!(restored.total, Some(2_000));
+        assert_eq!(restored.next_offset, Some(1_500));
+        assert!(!path.with_extension("json.tmp").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_checkpoint_keeps_existing_data_and_cleans_only_its_temporary_file() {
+        let root = std::env::temp_dir().join(format!(
+            "fastpotify-playlist-cache-failure-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let path = root.join("playlist.json");
+        let temporary = path.with_extension("json.tmp");
+        let cached = || CachedPlaylist {
+            snapshot: "new".into(),
+            items: Vec::new(),
+            total: Some(0),
+            next_offset: None,
+        };
+        std::fs::create_dir_all(&temporary).unwrap();
+        let previous = br#"{"snapshot":"old","items":[]}"#;
+        std::fs::write(&path, previous).unwrap();
+
+        assert!(write_cached_playlist(path.clone(), cached()).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), previous);
+        assert!(temporary.is_dir(), "a failed create does not own this path");
+
+        // Force final replacement to fail after serialization and flushing.
+        std::fs::remove_dir(&temporary).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("preserved"), previous).unwrap();
+        assert!(write_cached_playlist(path.clone(), cached()).await.is_err());
+        assert_eq!(std::fs::read(path.join("preserved")).unwrap(), previous);
+        assert!(!temporary.exists(), "discard the failed checkpoint");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -3602,9 +3900,126 @@ fn playback_account_matches(credentials: &Credentials, account: Option<AccountId
         .username
         .as_deref()
         .filter(|name| !name.is_empty())
-        .is_some_and(|name| {
-            account
-                .as_ref()
-                .is_some_and(|account| account.as_str() == name)
-        })
+        .is_some_and(|name| same_account(name, account.as_ref()))
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use crate::session_reads::Failure;
+
+    /// The session answers only for the account the Web API verified.
+    #[test]
+    fn the_session_answers_only_for_the_web_apis_account() {
+        let alice = AccountId::new("alice");
+        assert!(same_account("alice", Some(&alice)));
+        assert!(!same_account("bob", Some(&alice)));
+        assert!(!same_account("alice", None), "nothing verified yet");
+    }
+
+    /// A header read, a page of rows or a sample at the request's offset,
+    /// and nothing else: a duplicate check shares the rows' operation but
+    /// stays with the Web API.
+    #[test]
+    fn a_request_asks_the_session_for_a_header_or_a_page_or_nothing() {
+        let playlist = ApiRequest::Playlist {
+            id: "pl1".into(),
+            generation: 1,
+        };
+        assert_eq!(
+            session_read(&playlist),
+            Some(SessionRead::Header { id: "pl1" })
+        );
+        let items = ApiRequest::PlaylistItems {
+            id: "pl1".into(),
+            offset: 150,
+            generation: 1,
+        };
+        assert_eq!(
+            session_read(&items),
+            Some(SessionRead::Rows {
+                id: "pl1",
+                offset: 150
+            })
+        );
+        let sample = ApiRequest::PlaylistSample {
+            id: "pl1".into(),
+            offset: 150,
+            generation: 1,
+        };
+        assert_eq!(
+            session_read(&sample),
+            Some(SessionRead::Sample {
+                id: "pl1",
+                offset: 150
+            })
+        );
+        let duplicates = ApiRequest::CheckPlaylistDuplicates {
+            playlist_id: "pl1".into(),
+            playlist_name: "Mine".into(),
+            items: Vec::new(),
+            position: None,
+        };
+        assert_eq!(session_read(&duplicates), None);
+        assert_eq!(session_read(&ApiRequest::Me), None);
+    }
+
+    /// A session answer reaches the app as the Web API's would: a value, a
+    /// final refusal, or nothing, so the Web API is asked instead.
+    #[test]
+    fn a_session_answer_settles_like_a_web_api_one() {
+        assert!(matches!(settle(Ok::<u8, Failure>(7)), Some(Ok(7))));
+        let refused = settle(Err::<u8, Failure>(Failure::Definitive(ApiError::Status {
+            status: 403,
+            message: "Forbidden".into(),
+        })));
+        assert!(matches!(
+            refused,
+            Some(Err(ApiError::Status { status: 403, .. }))
+        ));
+        let dropped = settle(Err::<u8, Failure>(Failure::Retry(anyhow::anyhow!("gone"))));
+        assert!(dropped.is_none(), "the Web API gets its turn");
+    }
+
+    /// The response carries the request's own id, offset, and generation;
+    /// the app drops an answer whose generation is not the page's.
+    #[test]
+    fn a_session_answer_carries_the_requests_identity() {
+        let rows = || SessionAnswer::Rows(Ok(Page::default()));
+        let header = || SessionAnswer::Header(Ok(Playlist::default()));
+        let items = ApiRequest::PlaylistItems {
+            id: "pl1".into(),
+            offset: 150,
+            generation: 7,
+        };
+        assert!(matches!(
+            session_response(&items, rows()),
+            Some(ApiResponse::PlaylistItems { id, offset: 150, generation: 7, result: Ok(_) }) if id == "pl1"
+        ));
+        let sample = ApiRequest::PlaylistSample {
+            id: "pl1".into(),
+            offset: 150,
+            generation: 7,
+        };
+        assert!(matches!(
+            session_response(&sample, rows()),
+            Some(ApiResponse::PlaylistSample { id, generation: 7, result: Ok(_) }) if id == "pl1"
+        ));
+        let playlist = ApiRequest::Playlist {
+            id: "pl1".into(),
+            generation: 7,
+        };
+        assert!(matches!(
+            session_response(&playlist, header()),
+            Some(ApiResponse::Playlist { id, generation: 7, result: Ok(_) }) if id == "pl1"
+        ));
+        assert!(
+            session_response(&playlist, rows()).is_none(),
+            "rows are no header"
+        );
+        assert!(
+            session_response(&ApiRequest::Me, header()).is_none(),
+            "nothing else is served here"
+        );
+    }
 }

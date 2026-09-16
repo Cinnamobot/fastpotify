@@ -251,7 +251,8 @@ pub fn verify_version(executable: &Path, expected: &str) -> Result<()> {
                 .take(4096)
                 .read_to_string(&mut version)?;
             ensure!(
-                version.trim() == format!("fastpotify {expected}"),
+                version.trim() == format!("fastpotify {expected}")
+                    || version.trim() == format!("spotifast {expected}"),
                 "The downloaded app has the wrong version"
             );
             return Ok(());
@@ -674,12 +675,12 @@ mod tests {
     #[test]
     fn installer_arguments_use_paths_inno_setup_accepts() {
         assert_eq!(
-            installer_path(Path::new(r"\\?\C:\Users\test\Fastpotify")),
-            r"C:\Users\test\Fastpotify"
+            installer_path(Path::new(r"\\?\C:\Users\test\Spotifast")),
+            r"C:\Users\test\Spotifast"
         );
         assert_eq!(
-            installer_path(Path::new(r"\\?\UNC\server\share\Fastpotify")),
-            r"\\server\share\Fastpotify"
+            installer_path(Path::new(r"\\?\UNC\server\share\Spotifast")),
+            r"\\server\share\Spotifast"
         );
     }
 

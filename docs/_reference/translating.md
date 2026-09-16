@@ -1,10 +1,10 @@
 ---
-title: Translating Fastpotify
+title: Translating Spotifast
 description: Edit standard gettext catalogs and preview the translation pilot.
 nav_order: 6
 ---
 
-Fastpotify uses gettext `.po` files, so contributors can use existing translation
+Spotifast uses gettext `.po` files, so contributors can use existing translation
 editors such as Poedit or import the catalogs into Weblate. Translations are
 bundled in the application. No translation service is contacted at runtime.
 
@@ -92,7 +92,7 @@ or `msginit`. Set its language and plural rules and translate the pilot entries.
 A maintainer must also register the locale in the app and preview it before it
 becomes available. Adding a PO alone does not add a production language option.
 
-Use the [translation problem form](https://github.com/crmne/fastpotify/issues/new?template=translation.yml)
+Use the [translation problem form](https://github.com/crmne/spotifast/issues/new?template=translation.yml)
 for incorrect wording, missing translations or text that does not fit. Each
 report gets its own issue. Include the language, version, affected control, and
 the text you see; a suggested correction is welcome. The catalog headers link

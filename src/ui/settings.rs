@@ -251,7 +251,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             filtered_row(ui, &palette, &needle, "Account", &account_rows[1], |ui| {
                 if theme::pill_button(ui, &palette, "Setup guide", false).clicked() {
                     app.actions.push(Action::OpenUrl(
-                        "https://fastpotify.rocks/make-it-even-faster/".into(),
+                        "https://spotifast.rocks/make-it-even-faster/".into(),
                     ));
                 }
             });
@@ -313,8 +313,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             "Seconds one track overlaps the next. 0 turns it off, 12 is the most Spotify's own clients allow.",
         ),
         RowText::new("Keep music playing when the window closes", super::keys::platform_shortcut(
-                    "Fastpotify hides to the system tray. Quit from the tray menu or with Ctrl+Q.",
-                    "Fastpotify hides to the system tray. Quit from the tray menu or with Cmd+Q.",
+                    "Spotifast hides to the system tray. Quit from the tray menu or with Ctrl+Q.",
+                    "Spotifast hides to the system tray. Quit from the tray menu or with Cmd+Q.",
                 )),
         RowText::new("Automatic update checks", "Checks GitHub once a day. No personal data is sent."),
         RowText::new("Audio output", "PulseAudio also covers PipeWire. Rodio talks to ALSA directly.").when(cfg!(target_os = "linux")),
@@ -659,7 +659,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     let appearance_rows = [
-        RowText::new("Theme", ""),
+        RowText::new("Theme", {
+            let detail = app
+                .custom_themes
+                .detail(app.settings.custom_theme.as_deref());
+            if !detail.is_empty() {
+                detail.to_owned()
+            } else if app.custom_themes.follows_omarchy() {
+                "Follow system uses your Omarchy colours.".to_owned()
+            } else {
+                "Follow system uses your desktop's light or dark appearance.".to_owned()
+            }
+        }),
         RowText::new(
             "Colour from album art",
             "Use the current cover's colour on pages and the player bar.",
@@ -690,22 +701,65 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 "Appearance",
                 &appearance_rows[0],
                 |ui| {
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 6.0;
-                        for choice in ThemeChoice::ALL {
-                            if theme::soft_button(
-                                ui,
-                                &palette,
-                                None,
-                                choice.label(),
-                                app.settings.theme == choice,
-                            )
-                            .clicked()
-                                && app.settings.theme != choice
-                            {
-                                app.settings.theme = choice;
-                                changed = true;
-                            }
+                    ui.with_layout(Layout::top_down(Align::Max), |ui| {
+                        let selected = app
+                            .settings
+                            .custom_theme
+                            .as_deref()
+                            .map(theme::custom::label)
+                            .unwrap_or_else(|| app.settings.theme.label());
+                        let response = egui::ComboBox::from_id_salt("appearance_theme")
+                            .selected_text(selected)
+                            .width(200.0_f32.min(ui.available_width()))
+                            .show_ui(ui, |ui| {
+                                for choice in ThemeChoice::ALL {
+                                    if ui
+                                        .selectable_label(
+                                            app.settings.custom_theme.is_none()
+                                                && app.settings.theme == choice,
+                                            choice.label(),
+                                        )
+                                        .clicked()
+                                    {
+                                        app.actions.push(Action::SetTheme(choice));
+                                    }
+                                }
+                                if app.custom_themes.picker_themes().next().is_some() {
+                                    ui.separator();
+                                }
+                                for theme in app.custom_themes.picker_themes() {
+                                    if ui
+                                        .selectable_label(
+                                            app.settings.custom_theme.as_deref()
+                                                == Some(theme.filename.as_str()),
+                                            theme::custom::label(&theme.filename),
+                                        )
+                                        .clicked()
+                                    {
+                                        app.actions
+                                            .push(Action::SetCustomTheme(theme.filename.clone()));
+                                    }
+                                }
+                            });
+                        response.response.widget_info(|| {
+                            let mut info = egui::WidgetInfo::labeled(
+                                egui::WidgetType::ComboBox,
+                                ui.is_enabled(),
+                                "Theme",
+                            );
+                            info.current_text_value = Some(selected.to_owned());
+                            info
+                        });
+                        if theme::soft_button(
+                            ui,
+                            &palette,
+                            Some(Icon::ExternalLink),
+                            "Open themes folder",
+                            false,
+                        )
+                        .clicked()
+                        {
+                            app.actions.push(Action::OpenThemesFolder);
                         }
                     });
                 },
@@ -889,7 +943,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if skins_rows[1].matches(&needle, "Winamp skins")
                 || skins_rows[5].matches(&needle, "Winamp skins")
             {
-                let mut options: Vec<(usize, &str)> = vec![(0, "Fastpotify")];
+                let mut options: Vec<(usize, &str)> = vec![(0, "Spotifast")];
                 options.extend(
                     choices
                         .iter()
@@ -995,7 +1049,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         RowText::new(
             "Presets",
             format!(
-                "{} in {}. Add .milk files here. Fastpotify downloads presets when MilkDrop first opens with an empty folder.",
+                "{} in {}. Add .milk files here. Spotifast downloads presets when MilkDrop first opens with an empty folder.",
                 match count {
                     0 => "None yet".to_string(),
                     1 => "One preset".to_string(),
@@ -1267,7 +1321,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     let about_rows = [
         RowText::new(
-            format!("Fastpotify {}", env!("CARGO_PKG_VERSION")),
+            format!("Spotifast {}", env!("CARGO_PKG_VERSION")),
             "Built with Rust, egui, and librespot. Not affiliated with Spotify.",
         ),
         RowText::new(
@@ -1284,7 +1338,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.vertical(|ui| {
                     theme::text(
                         ui,
-                        format!("Fastpotify {}", env!("CARGO_PKG_VERSION")),
+                        format!("Spotifast {}", env!("CARGO_PKG_VERSION")),
                         theme::semibold(15.0),
                         palette.text,
                     );

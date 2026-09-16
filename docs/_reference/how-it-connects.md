@@ -1,12 +1,12 @@
 ---
 title: How It Connects
-description: Fastpotify's independent Spotify grants, what is stored, and how API traffic is routed.
+description: Independent Spotify grants, what is stored, and how API traffic is routed.
 nav_order: 1
 ---
 
 ## Independent grants, once each
 
-Fastpotify uses separate credentials for Web API access, a personal app, and
+Spotifast uses separate credentials for Web API access, a personal app, and
 local playback:
 
 1. **The shared Web API app** keeps full catalogue and playlist coverage.
@@ -19,7 +19,9 @@ local playback:
 3. **Local playback** uses
    [librespot](https://github.com/librespot-org/librespot). It needs one more
    browser approval and keeps an independent reusable credential. Spotify Premium
-   is required.
+   is required. While it is signed in, its session also reads the playlists
+   the shared app would otherwise be asked for: other people's, and the
+   account's own when there is no personal app.
 
 Local playback authorization stays separate from both Web API grants. Its
 browser approval requests only the streaming permission and always shows the
@@ -31,14 +33,21 @@ On `main`, for the release after 0.7.1, local playback retains the artist IDs
 already supplied by librespot. Artist links in the player bar work before the
 Web API's track metadata arrives, without an extra request.
 
+On `main`, after 0.7.1, local seeks discard audio queued from the previous
+position once librespot confirms the seek. This also applies when another
+Spotify client controls playback on this computer. Natural track transitions
+retain their queue for gapless playback. The seek still waits for librespot to
+find and fetch the requested audio, and sound already handed to the device
+cannot be recalled. Seeking adds no Web API request or full-track download.
+
 On `main`, for the release after 0.7.1, requests that need a grant still being
 verified wait for it instead of showing "not signed in". Sign-out cancels
 pending requests, and their late results cannot undo a new sign-in. If Spotify
-rejects a saved refresh grant, Fastpotify removes that grant and asks for a new
+rejects a saved refresh grant, Spotifast removes that grant and asks for a new
 browser approval. Upgrading to protected storage does not itself require
 signing in again.
 
-By default, Fastpotify uses the public app shared with spotify-player, ncspot,
+By default, Spotifast uses the public app shared with spotify-player, ncspot,
 and Omarchy Spotify. Spotify divides its quota among all users. A personal app
 adds a separate Development Mode quota. See
 [Use a Personal Spotify App](/make-it-even-faster/).
@@ -73,7 +82,7 @@ and dragging never write that order back to Spotify.
 - On `main`, for the release after 0.7.1, shared and personal Web API grants
   and the reusable playback credential use the platform credential store:
   Secret Service on Linux, Keychain on macOS, and Credential Manager on
-  Windows. Librespot retains its reusable credential in memory; Fastpotify
+  Windows. Librespot retains its reusable credential in memory; Spotifast
   owns persistence. Flatpak can talk to `org.freedesktop.secrets` for this.
   Version 0.7.1 still uses the older unencrypted files.
   See [migration, sign-out, and storage protection](/settings-and-files/).
@@ -94,7 +103,7 @@ and dragging never write that order back to Spotify.
   prefixes refresh through the existing Web API grant, one page at a time,
   while the saved rows remain visible. Manual refresh starts immediately.
   Like and Unlike are kept over lagging reads until Spotify confirms them.
-- Fastpotify has no telemetry, analytics, or hosted service. When the lyrics
+- Spotifast has no telemetry, analytics, or hosted service. When the lyrics
   panel is open and Spotify has no lyrics, it sends the track's artist, title,
   album, and length to [lrclib.net](https://lrclib.net). It also checks
   api.github.com once a day for updates. You can turn off automatic checks in
@@ -103,7 +112,7 @@ and dragging never write that order back to Spotify.
 
   On Windows, macOS, and Linux, downloading an update fetches release metadata and
   `checksums.txt` from the project's GitHub release, then the matching binary
-  archive, Windows installer, or universal macOS DMG. Fastpotify checks the published SHA-256 digest
+  archive, Windows installer, or universal macOS DMG. Spotifast checks the published SHA-256 digest
   and the portable executable's reported version before offering a restart.
   Automatic downloads are optional; installation always waits for your click.
   Checks and downloads do not open the update popup. The green update pill opens
@@ -121,18 +130,29 @@ and dragging never write that order back to Spotify.
   macOS security assessment. Apps running from a disk image or an App Translocation
   directory must be moved to a writable installation directory first.
 
+On `main`, after 0.7.1, album and playlist scrollbars can request a distant track
+page through the existing session or Web API read path, without fetching all
+preceding tracks. These reads run one at a time per list and retain the existing
+rate-limit handling. Unloaded
+rows are placeholders until their page arrives; scrolling never starts playback.
+
 ## When Spotify pushes back
 
 Each Web API session has separate concurrency and rate limits. A `Retry-After`
-response pauses only that session. Fastpotify routes each request once and
-does not retry it through the other app.
+response pauses only that session. Spotifast routes each request once and
+does not retry it through the other app. A playlist read the librespot session
+refuses outright, because the playlist is gone or private, is shown as such. A
+dropped connection, a read that takes longer than 30 seconds, or a page whose
+song details Spotify did not supply in full, hands the read to the Web API
+instead of caching rows without songs. A song Spotify no longer has, or
+withholds for legal reasons, is an empty row, as the Web API shows it.
 
 Spotify can also explicitly refuse the key needed to decrypt a track. When
-that happens, Fastpotify stops local playback and leaves the rest of the queue
+that happens, Spotifast stops local playback and leaves the rest of the queue
 alone instead of treating every following track as unavailable. This refusal
 comes from Spotify; trying again later may work.
 
-Before adding songs to an existing playlist, Fastpotify checks the rows it
+Before adding songs to an existing playlist, Spotifast checks the rows it
 already holds. A known duplicate produces an immediate confirmation naming the
 song. Only a playlist that has not been fully loaded needs a background scan to
 rule out duplicates. Once confirmed, the new rows appear locally at once.
@@ -142,7 +162,16 @@ through the same Web API grant. Duplicate checks and confirmation retain that
 position; partial loaded pages keep the correct continuation offset. A
 successful write advances the cached playlist to Spotify's returned snapshot
 instead of downloading the playlist again. If Spotify cannot answer the scan,
-Fastpotify preserves the requested edit and lets the write report its result.
+Spotifast preserves the requested edit and lets the write report its result.
+
+On `main`, after 0.7.1, manually reloading an edited playlist waits for all
+pending writes and confirmation of the returned Spotify revision before
+requesting replacement rows. Current rows, filtering, sorting, and selection
+stay visible while it loads. Automatic paging also waits for those edits.
+If metadata still reports an older revision after three immediate rechecks,
+or the request fails, the page keeps the edits and offers a retry. Refreshing
+again retries confirmation without losing the local changes. This uses the
+existing playlist requests and adds no periodic polling.
 
 ## Receivers on the local network
 
@@ -157,12 +186,12 @@ seconds overall after discovery. Only responding receivers with a name and
 ID are offered. Matching IDs are combined; separate devices can have the
 same name. These reads send no account credential.
 
-When a receiver is selected, Fastpotify encrypts the stored librespot credential
+When a receiver is selected, Spotifast encrypts the stored librespot credential
 with a receiver-specific key and a key from a Diffie-Hellman exchange. The
-encrypted value only works for that receiver and exchange. Fastpotify does not
+encrypted value only works for that receiver and exchange. Spotifast does not
 save another copy of the credential.
 
-The receiver then signs in and appears in Spotify's device list. Fastpotify
+The receiver then signs in and appears in Spotify's device list. Spotifast
 uses the Web API for subsequent control requests.
 
 ## The engine
@@ -171,7 +200,7 @@ Playback runs on a separate runtime. Librespot maintains the Spotify Connect
 session, exposes this computer as a device, receives transfers, and reports
 playback state. If the session drops, it reconnects with the stored credential.
 The same session checks releases that the Web API calls `single`, so confirmed
-EPs can carry their precise label. Fastpotify deduplicates these checks while
+EPs can carry their precise label. Spotifast deduplicates these checks while
 the app session is active. If the engine reconnects, an interrupted check may
 be tried again; if metadata is unavailable, its label stays `Single`.
 
@@ -184,3 +213,15 @@ Each access-point attempt gives socket setup and the handshake a combined
 five seconds. A stalled TCP connection or HTTP proxy tunnel therefore lets
 librespot retry and move on to another endpoint instead of waiting for the
 operating system's longer connection timeout.
+
+On `main`, after 0.7.1, the access-point and Dealer TCP connectors resolve
+names off the playback runtime thread and try all returned addresses. If
+the preferred IPv4 or IPv6 route stalls, the other family starts after
+300 ms. DNS, TCP setup and any HTTP proxy tunnel share a five-second limit.
+The access-point handshake still shares its existing five-second budget;
+the Dealer's WebSocket TLS verification is unchanged.
+
+When a proxy is configured, only its name is resolved locally. The target
+name is sent through CONNECT, and a proxy failure never falls back to a
+direct connection. Proxy URLs and credentials are not logged by this
+connector. The change adds no destination or background polling.

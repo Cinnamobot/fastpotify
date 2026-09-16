@@ -25,7 +25,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!("{warning}");
         }
         let Some(fastpotify::credentials::Grant::Playback(credentials)) = loaded.grant else {
-            anyhow::bail!("Enable playback in Fastpotify first");
+            anyhow::bail!("Enable playback in Spotifast first");
         };
         let session = Session::new(SessionConfig::default(), Some(cache));
         session.connect(credentials, false).await?;

@@ -2,7 +2,7 @@
 //!
 //! A `.wsz` file contains bitmap sprite sheets and two small text files. This
 //! module decodes them to RGBA textures. [`sprites`] defines source coordinates;
-//! [`layout`] defines window positions. Missing files fall back to Fastpotify's
+//! [`layout`] defines window positions. Missing files fall back to Spotifast's
 //! built-in classic skin. Modern `.wal` skins are unsupported.
 
 pub mod config;
@@ -28,7 +28,7 @@ pub enum SkinError {
     NotAnArchive,
     #[error("{0}")]
     Archive(zip::ZipError),
-    #[error("this is a modern Winamp skin, which Fastpotify cannot draw; it needs a classic one")]
+    #[error("this is a modern Winamp skin, which Spotifast cannot draw; it needs a classic one")]
     ModernSkin,
     #[error("no skin bitmaps were found inside")]
     Empty,
@@ -208,7 +208,7 @@ impl Skin {
         })
     }
 
-    /// The skin Fastpotify ships, drawn for it and packed as a `.wsz` like
+    /// The skin Spotifast ships, drawn for it and packed as a `.wsz` like
     /// any other, so it goes through the same reader. It has every sheet,
     /// so any other skin's gaps can be filled from it.
     pub fn builtin() -> Arc<Skin> {
@@ -279,7 +279,7 @@ fn wanted(file_name: &str) -> bool {
 const BUILTIN_ARCHIVE: &[u8] = include_bytes!("../../assets/skins/fastpotify.wsz");
 
 static BUILTIN: LazyLock<Arc<Skin>> = LazyLock::new(|| {
-    Arc::new(Skin::from_archive("Fastpotify", BUILTIN_ARCHIVE).expect("the built-in skin reads"))
+    Arc::new(Skin::from_archive("Spotifast", BUILTIN_ARCHIVE).expect("the built-in skin reads"))
 });
 
 #[cfg(test)]
@@ -326,7 +326,7 @@ mod tests {
             );
         }
         assert!(skin.has_extended_digits());
-        assert_eq!(skin.name, "Fastpotify");
+        assert_eq!(skin.name, "Spotifast");
     }
 
     #[test]

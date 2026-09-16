@@ -1,4 +1,4 @@
-//! Where Fastpotify keeps its files.
+//! Where Spotifast keeps its files.
 //!
 //! Configuration, durable non-secret state, and disposable caches live in the
 //! platform's conventional directories. Spotify grants use the platform store;
@@ -17,6 +17,7 @@ pub struct AppDirs {
 
 impl AppDirs {
     pub fn discover() -> Self {
+        // Keep the established paths so upgrades reuse settings and credentials.
         let project = ProjectDirs::from("me", "paolino", "fastpotify");
         match project {
             Some(project) => Self {

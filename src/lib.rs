@@ -1,4 +1,4 @@
-//! Fastpotify's internals, exposed so diagnostics and tests can reach them.
+//! Spotifast's internals, exposed so diagnostics and tests can reach them.
 
 pub mod api;
 pub mod app;
@@ -7,6 +7,7 @@ pub mod automix;
 pub mod automix_cuepoints;
 pub mod automix_driver;
 pub mod automix_track;
+pub mod autoscroll;
 pub mod backend;
 pub mod bidi;
 pub mod credentials;
@@ -39,6 +40,7 @@ pub mod opener;
 pub mod paths;
 pub mod player;
 pub mod resample;
+pub mod session_reads;
 pub mod settings;
 pub mod single_instance;
 pub mod sink;

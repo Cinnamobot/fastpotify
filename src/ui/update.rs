@@ -26,7 +26,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             spread: 0,
             color: palette.shadow,
         });
-    egui::Window::new("Update Fastpotify")
+    egui::Window::new("Update Spotifast")
         .id(egui::Id::new("fastpotify-update"))
         .title_bar(false)
         .resizable(false)
@@ -37,25 +37,60 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.set_width(420.0_f32.min((ctx.content_rect().width() - 64.0).max(240.0)));
             ui.horizontal(|ui| {
-                theme::text(ui, "Update Fastpotify", theme::bold(20.0), palette.text);
+                theme::text(ui, "Update Spotifast", theme::bold(20.0), palette.text);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    close |= theme::icon_button(ui, Icon::X, 18.0, palette.secondary, palette.text, "Close update").clicked();
+                    close |= theme::icon_button(
+                        ui,
+                        Icon::X,
+                        18.0,
+                        palette.secondary,
+                        palette.text,
+                        "Close update",
+                    )
+                    .clicked();
                 });
             });
             ui.add_space(4.0);
-            theme::text(ui, format!("{} → {}", env!("CARGO_PKG_VERSION"), release.version), theme::regular(14.0), palette.secondary);
+            theme::text(
+                ui,
+                format!("{} → {}", env!("CARGO_PKG_VERSION"), release.version),
+                theme::regular(14.0),
+                palette.secondary,
+            );
             ui.add_space(20.0);
             let mut action = None;
             let mut release_link = "Release notes";
             match &app.update_download {
                 DownloadState::Downloading { received, total } => {
                     let checking = *total > 0 && received == total;
-                    theme::text(ui, if checking { "Checking download…" } else { "Downloading update…" }, theme::medium(14.0), palette.text);
+                    theme::text(
+                        ui,
+                        if checking {
+                            "Checking download…"
+                        } else {
+                            "Downloading update…"
+                        },
+                        theme::medium(14.0),
+                        palette.text,
+                    );
                     ui.add_space(8.0);
                     if *total > 0 {
-                        ui.add(egui::ProgressBar::new(*received as f32 / *total as f32).fill(palette.accent).desired_height(6.0));
+                        ui.add(
+                            egui::ProgressBar::new(*received as f32 / *total as f32)
+                                .fill(palette.accent)
+                                .desired_height(6.0),
+                        );
                         ui.add_space(6.0);
-                        theme::text(ui, format!("{:.1} of {:.1} MB", *received as f64 / 1_000_000.0, *total as f64 / 1_000_000.0), theme::regular(12.0), palette.secondary);
+                        theme::text(
+                            ui,
+                            format!(
+                                "{:.1} of {:.1} MB",
+                                *received as f64 / 1_000_000.0,
+                                *total as f64 / 1_000_000.0
+                            ),
+                            theme::regular(12.0),
+                            palette.secondary,
+                        );
                     } else {
                         theme::spinner(ui, 16.0, palette.accent);
                     }
@@ -63,42 +98,85 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                 DownloadState::Ready(_) => {
                     theme::text(ui, "Ready to install", theme::semibold(14.0), palette.text);
                     ui.add_space(6.0);
-                    ui.add(egui::Label::new(RichText::new("Music playing on this computer will stop when Fastpotify restarts.").font(theme::regular(14.0)).color(palette.secondary)).wrap());
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(
+                                "Music playing on this computer will stop when Spotifast restarts.",
+                            )
+                            .font(theme::regular(14.0))
+                            .color(palette.secondary),
+                        )
+                        .wrap(),
+                    );
                     action = Some(("Restart to update", Action::InstallUpdate));
                 }
                 DownloadState::Installing => {
                     ui.horizontal(|ui| {
                         theme::spinner(ui, 16.0, palette.accent);
-                        theme::text(ui, "Preparing to restart…", theme::regular(14.0), palette.text);
+                        theme::text(
+                            ui,
+                            "Preparing to restart…",
+                            theme::regular(14.0),
+                            palette.text,
+                        );
                     });
                 }
                 DownloadState::Idle | DownloadState::Failed(_) => {
                     if let DownloadState::Failed(error) = &app.update_download {
-                        ui.add(egui::Label::new(RichText::new(error).font(theme::regular(14.0)).color(palette.danger)).wrap());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(error)
+                                    .font(theme::regular(14.0))
+                                    .color(palette.danger),
+                            )
+                            .wrap(),
+                        );
                         ui.add_space(8.0);
                     }
                     match &app.update_support {
-                        None => { theme::spinner(ui, 16.0, palette.accent); }
+                        None => {
+                            theme::spinner(ui, 16.0, palette.accent);
+                        }
                         Some(Err(reason)) => {
-                            ui.add(egui::Label::new(RichText::new(reason).font(theme::regular(14.0)).color(palette.secondary)).wrap());
+                            ui.add(
+                                egui::Label::new(
+                                    RichText::new(reason)
+                                        .font(theme::regular(14.0))
+                                        .color(palette.secondary),
+                                )
+                                .wrap(),
+                            );
                             release_link = "Download from GitHub";
                         }
                         Some(Ok(_)) => {
-                            action = Some((if matches!(app.update_download, DownloadState::Failed(_)) { "Retry download" } else { "Download update" }, Action::DownloadUpdate));
+                            action = Some((
+                                if matches!(app.update_download, DownloadState::Failed(_)) {
+                                    "Retry download"
+                                } else {
+                                    "Download update"
+                                },
+                                Action::DownloadUpdate,
+                            ));
                         }
                     }
                 }
             }
             ui.add_space(16.0);
             ui.horizontal(|ui| {
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if let Some((label, action)) = action
-                    && theme::pill_button(ui, &palette, label, true).clicked() {
-                    app.actions.push(action);
-                }
-                ui.add_space(8.0);
-                ui.add(egui::Hyperlink::from_label_and_url(RichText::new(release_link).font(theme::medium(13.0)).color(palette.secondary), &release.url));
-            });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if let Some((label, action)) = action
+                        && theme::pill_button(ui, &palette, label, true).clicked()
+                    {
+                        app.actions.push(action);
+                    }
+                    ui.add_space(8.0);
+                    ui.add(egui::Hyperlink::from_label_and_url(
+                        RichText::new(release_link)
+                            .font(theme::medium(13.0))
+                            .color(palette.secondary),
+                        &release.url,
+                    ));
+                });
             });
         });
     if close {

@@ -209,6 +209,8 @@ pub struct LocalState {
     /// on it rather than show it.
     pub failure: Option<PlaybackFailure>,
     pub seek_sequence: u64,
+    /// A newly loaded track, including another play of the same URI.
+    pub track_sequence: u64,
 }
 
 /// What local playback was doing when its session ended, so the engine
@@ -533,19 +535,9 @@ impl Engine {
         })
     }
 
-    /// The display name behind a user id, from the profile view Spotify's
-    /// clients read; `None` when nothing answers.
-    pub async fn user_display_name(&self, user_id: &str) -> Option<String> {
-        let bytes = self
-            .session
-            .spclient()
-            .get_user_profile(user_id, Some(0), Some(0))
-            .await
-            .ok()?;
-        let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-        json.get("name")
-            .and_then(|value| value.as_str())
-            .map(str::to_string)
+    /// The streaming session, for reads that need no Web API quota.
+    pub fn session(&self) -> &Session {
+        &self.session
     }
 
     pub fn shutdown(&self) {
@@ -785,6 +777,11 @@ async fn run_events(
             );
             continue;
         }
+        // The sink follows the engine's own event, so a track change, a seek
+        // and a stop reach it the same way whether or not the host is
+        // watching for automix.
+        audio.handle_player_event(&event);
+
         // The preload handshake is the one thing automix cannot work without:
         // no probe means no incoming grid, and no `Ready` means the player has
         // nothing to mix in at the boundary. None of these events reach the
@@ -809,7 +806,6 @@ async fn run_events(
         }
         match &event {
             PlayerEvent::TrackChanged { .. } => {
-                audio.track_changed();
                 if let Some(automix) = &mut automix {
                     // The player may still be holding the plan for the
                     // boundary that just passed, and a new track has no use
@@ -821,7 +817,6 @@ async fn run_events(
                 }
             }
             PlayerEvent::Seeked { .. } => {
-                audio.track_changed();
                 if let Some(automix) = &mut automix {
                     if automix.withdraw_plan() {
                         player.set_crossfade_plan(None);
@@ -829,7 +824,6 @@ async fn run_events(
                     automix.seeked();
                 }
             }
-            PlayerEvent::Stopped { .. } => audio.stopped(),
             _ => {}
         }
         if let Some(automix) = &mut automix {
@@ -1264,9 +1258,14 @@ fn apply_event(state: &mut LocalState, event: PlayerEvent) -> bool {
             true
         }
         PlayerEvent::TrackChanged { audio_item } => {
-            let mut changed = set(&mut state.track, Some(local_track(&audio_item)));
-            changed |= clear_failure(&mut state.error, &mut state.failure);
-            changed
+            state.track = Some(local_track(&audio_item));
+            // librespot emits this when a loaded track starts, including a
+            // repeat whose URI and metadata are identical to the previous play.
+            state.track_sequence = state.track_sequence.wrapping_add(1);
+            // The kind and the message are one piece of state, so the track
+            // change that ends a failure clears both.
+            clear_failure(&mut state.error, &mut state.failure);
+            true
         }
         PlayerEvent::Unavailable { track_id, .. } => {
             state.failure = Some(PlaybackFailure::Unavailable);
@@ -1831,6 +1830,65 @@ mod tests {
     }
 
     #[test]
+    fn each_loaded_track_has_a_new_history_sequence_but_seek_and_pause_do_not() {
+        let item = AudioItem {
+            track_id: uri(),
+            uri: uri().to_uri().unwrap(),
+            files: Default::default(),
+            name: "Short interlude".into(),
+            covers: vec![],
+            language: vec![],
+            duration_ms: 40_000,
+            is_explicit: false,
+            availability: Ok(()),
+            alternatives: None,
+            unique_fields: UniqueFields::Track {
+                artists: librespot_metadata::artist::ArtistsWithRole(vec![]),
+                album: "Album".into(),
+                album_artists: vec![],
+                popularity: 0,
+                number: 1,
+                disc_number: 1,
+            },
+        };
+        let mut state = LocalState::default();
+        for sequence in [1, 2] {
+            assert!(apply_event(
+                &mut state,
+                PlayerEvent::TrackChanged {
+                    audio_item: Box::new(item.clone())
+                }
+            ));
+            assert_eq!(state.track_sequence, sequence);
+            for event in [
+                PlayerEvent::Playing {
+                    play_request_id: sequence,
+                    track_id: uri(),
+                    position_ms: 0,
+                },
+                PlayerEvent::Paused {
+                    play_request_id: sequence,
+                    track_id: uri(),
+                    position_ms: 20_000,
+                },
+                PlayerEvent::Seeked {
+                    play_request_id: sequence,
+                    track_id: uri(),
+                    position_ms: 0,
+                },
+                PlayerEvent::Playing {
+                    play_request_id: sequence,
+                    track_id: uri(),
+                    position_ms: 0,
+                },
+            ] {
+                apply_event(&mut state, event);
+                assert_eq!(state.track_sequence, sequence);
+            }
+        }
+    }
+
+    #[test]
     fn position_interpolates_only_while_playing() {
         let mut state = LocalState {
             playback: Playback::Paused,
@@ -1887,7 +1945,7 @@ mod tests {
     fn an_inactive_connect_device_keeps_its_engine_session() {
         let mut state = LocalState {
             connected: true,
-            active_client: "Fastpotify".into(),
+            active_client: "Spotifast".into(),
             ..LocalState::default()
         };
 
@@ -1936,7 +1994,7 @@ mod tests {
             eq: crate::eq::shared(),
             analysis: None,
             automix_view: crate::automix_driver::shared_view(),
-            device_name: "Fastpotify".into(),
+            device_name: "Spotifast".into(),
             bitrate_kbps: 320,
             normalisation: false,
             autoplay: true,

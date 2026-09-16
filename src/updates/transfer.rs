@@ -30,7 +30,7 @@ impl Source {
     fn release(&self, version: &str) -> String {
         match self {
             Self::GitHub => {
-                format!("https://api.github.com/repos/crmne/fastpotify/releases/tags/v{version}")
+                format!("https://api.github.com/repos/crmne/spotifast/releases/tags/v{version}")
             }
             #[cfg(feature = "demo")]
             Self::Local(base) => format!("{base}/latest.json"),
@@ -154,7 +154,7 @@ pub fn download_for(
     );
     let policy = source.clone();
     let http = reqwest::blocking::Client::builder()
-        .user_agent(concat!("Fastpotify/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("Spotifast/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(15 * 60))
         .redirect(reqwest::redirect::Policy::custom(move |attempt| {
@@ -206,7 +206,7 @@ pub fn download_for(
                 url.host_str() == Some("github.com")
                     && url.path()
                         == format!(
-                            "/crmne/fastpotify/releases/download/v{}/{}",
+                            "/crmne/spotifast/releases/download/v{}/{}",
                             release.version, candidate.name
                         ),
                 "Update asset does not belong to this release"
@@ -271,10 +271,16 @@ pub fn download_for(
         let payload = if installation.kind == install::Kind::WindowsInstaller {
             archive.clone()
         } else {
-            let executable = if cfg!(windows) {
-                "fastpotify.exe"
-            } else {
-                "fastpotify"
+            let canonical = installation
+                .executable
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("spotifast"));
+            let executable = match (canonical, cfg!(windows)) {
+                (true, true) => "spotifast.exe",
+                (true, false) => "spotifast",
+                (false, true) => "fastpotify.exe",
+                (false, false) => "fastpotify",
             };
             let payload = directory.join(executable);
             install::extract(&archive, &format!("{stem}/{executable}"), &payload)?;

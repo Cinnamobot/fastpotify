@@ -1,13 +1,13 @@
-# Fastpotify <sub>+ automix</sub>
+# Spotifast <sub>+ automix</sub>
 
-**[Fastpotify](https://github.com/crmne/fastpotify) のフォークです。**
+**[Spotifast](https://github.com/crmne/spotifast) のフォークです**(旧 Fastpotify)。
 アプリとしての機能 — Spotify Connect、ライブラリ、検索、プレイリスト編集、
 キュー、Winamp ミニプレイヤー、MilkDrop、イコライザー、MPRIS、設定、
 インストールと配布 — は**すべて本家の成果物**です。
 **それらについては本家の README を読んでください。**
 
-> **→ [crmne/fastpotify の README](https://github.com/crmne/fastpotify#readme)**
-> **→ [fastpotify.rocks](https://fastpotify.rocks/)** (インストール・セットアップ・使い方)
+> **→ [crmne/spotifast の README](https://github.com/crmne/spotifast#readme)**
+> **→ [spotifast.rocks](https://spotifast.rocks/)** (インストール・セットアップ・使い方)
 
 このフォークが足すのは **automix** だけです。曲と曲の繋ぎ目を、タイマーではなく
 **音楽に合わせて決める**機能で、本家には存在しません。
@@ -273,6 +273,6 @@ automix は何時間も走ります。だから**数百曲を再生して初め�
 
 ## ライセンス / 帰属
 
-本家 [crmne/fastpotify](https://github.com/crmne/fastpotify) と
+本家 [crmne/spotifast](https://github.com/crmne/spotifast)(旧 fastpotify)と
 [librespot-org/librespot](https://github.com/librespot-org/librespot) に基づきます。
 ライセンスは両者と同じ MIT です。Spotify とは無関係です。

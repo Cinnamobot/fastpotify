@@ -56,6 +56,8 @@ pub enum Outcome {
 pub enum ControlCommand {
     /// Bring the window forward, creating it if needed.
     Show,
+    /// Re-read local palette files without showing the window or restarting audio.
+    ReloadThemes,
     PlayPause,
     Play,
     Pause,
@@ -132,7 +134,7 @@ pub const NO_DEVICES: &str = "[]";
 const INSTANCE_PORT: u16 = 47_113;
 
 /// Every request and reply starts with this, so a foreign program that
-/// happens to hold the port is never mistaken for Fastpotify.
+/// happens to hold the port is never mistaken for Spotifast.
 #[cfg(not(target_os = "linux"))]
 const PREFIX: &str = "fastpotify:";
 #[cfg(not(target_os = "linux"))]
@@ -186,7 +188,7 @@ fn send_to(port: u16, verb: &str) -> std::io::Result<Reply> {
     } else {
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            "the port is held by something other than Fastpotify",
+            "the port is held by something other than Spotifast",
         ))
     }
 }
@@ -209,20 +211,20 @@ pub fn acquire(waker: &crate::backend::Waker, link: Option<&str>) -> Outcome {
         Ok(listener) => listener,
         Err(_) => {
             // Raise the existing instance only if the port answers as
-            // Fastpotify. A link goes with the request; an instance from
+            // Spotifast. A link goes with the request; an instance from
             // before links does not answer that verb, so a plain show
             // follows and the link is dropped rather than the launch.
             let accepted = |reply: Reply| matches!(reply, Reply::Ok);
             let opened =
                 link.is_some_and(|uri| send(&format!("open-link {uri}")).is_ok_and(accepted));
             if link.is_some() && !opened {
-                log::warn!("the running Fastpotify does not take links; asking it to show");
+                log::warn!("the running Spotifast does not take links; asking it to show");
             }
             let answered = opened || send("show").is_ok_and(accepted);
             if answered {
                 return Outcome::Surfaced;
             }
-            log::warn!("port {INSTANCE_PORT} is busy but not with Fastpotify; running unguarded");
+            log::warn!("port {INSTANCE_PORT} is busy but not with Spotifast; running unguarded");
             return Outcome::Only(unguarded());
         }
     };
@@ -311,6 +313,7 @@ fn parse(line: &str) -> Option<Request> {
     };
     let command = match (verb, argument) {
         ("show", None) => ControlCommand::Show,
+        ("reload-themes", None) => ControlCommand::ReloadThemes,
         ("playpause", None) => ControlCommand::PlayPause,
         ("play", None) => ControlCommand::Play,
         ("pause", None) => ControlCommand::Pause,
@@ -406,6 +409,14 @@ struct Instance {
 #[cfg(target_os = "linux")]
 #[zbus::interface(name = "rocks.fastpotify.Instance")]
 impl Instance {
+    fn reload_themes(&self) {
+        self.commands
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .push(ControlCommand::ReloadThemes);
+        self.waker.wake();
+    }
+
     /// Opens the page for a Spotify link and brings the window forward. A
     /// link that is not a page the app has is refused, so the caller can
     /// fall back to showing the window.
@@ -419,6 +430,23 @@ impl Instance {
         self.waker.wake();
         Ok(())
     }
+}
+
+/// Re-read local themes in an existing instance. A theme hook must never start
+/// the app or raise its window; use the existing private interface, not MPRIS.
+#[cfg(target_os = "linux")]
+pub fn reload_themes() -> zbus::Result<()> {
+    let connection = zbus::blocking::connection::Builder::session()?
+        .method_timeout(std::time::Duration::from_secs(2))
+        .build()?;
+    let proxy =
+        zbus::blocking::Proxy::new(&connection, INSTANCE_NAME, INSTANCE_PATH, INSTANCE_NAME)?;
+    let _: Option<()> = proxy.call_with_flags(
+        "ReloadThemes",
+        zbus::proxy::MethodFlags::NoAutoStart.into(),
+        &(),
+    )?;
+    Ok(())
 }
 
 /// Claims the running-instance role, or hands `link` (a canonical
@@ -465,7 +493,7 @@ pub fn acquire(waker: &crate::backend::Waker, link: Option<&str>) -> Outcome {
         Ok(_) | Err(mpris_server::zbus::Error::NameTaken) => {
             if !raise_running_instance(&connection, link) {
                 log::warn!(
-                    "Fastpotify is already running but did not answer; not starting a second copy"
+                    "Spotifast is already running but did not answer; not starting a second copy"
                 );
             }
             Outcome::Surfaced
@@ -587,7 +615,7 @@ fn raise_running_instance(
         );
         if raised.is_ok() {
             if link.is_some() {
-                log::warn!("the running Fastpotify does not take links; asked it to show");
+                log::warn!("the running Spotifast does not take links; asked it to show");
             }
             return true;
         }
@@ -627,7 +655,7 @@ mod bus_tests {
     #[test]
     fn a_link_reaches_the_running_instance_over_the_bus() {
         // #given an instance answering on its own connection, not the
-        // shared name, so a Fastpotify already running is left alone
+        // shared name, so a Spotifast already running is left alone
         let Ok(server) = zbus::blocking::Connection::session() else {
             eprintln!("no session bus here; nothing to test");
             return;
@@ -689,6 +717,11 @@ mod tests {
     fn parses_every_control_verb() {
         // #given / #when / #then
         assert_eq!(command("fastpotify:show\n"), Some(ControlCommand::Show));
+        assert_eq!(
+            command("fastpotify:reload-themes"),
+            Some(ControlCommand::ReloadThemes)
+        );
+        assert_eq!(command("fastpotify:reload-themes extra"), None);
         assert_eq!(
             command("fastpotify:playpause"),
             Some(ControlCommand::PlayPause)

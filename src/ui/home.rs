@@ -19,11 +19,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     quick_access(app, ui);
     ui.add_space(16.0);
 
-    made_for_you(app, ui);
+    if app.settings.home.made_for_you.visible {
+        made_for_you(app, ui);
+    }
     recently_played(app, ui);
     top_artists(app, ui);
     top_tracks(app, ui);
-    recommendations(app, ui);
+    if app.settings.home.recommendations.visible {
+        recommendations(app, ui);
+    }
 }
 
 struct Tile {

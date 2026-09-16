@@ -1,15 +1,15 @@
 # SOME DESCRIPTIVE TITLE.
-# Copyright (C) YEAR Fastpotify contributors
-# This file is distributed under the same license as the Fastpotify package.
+# Copyright (C) YEAR Spotifast contributors
+# This file is distributed under the same license as the Spotifast package.
 # FIRST AUTHOR <EMAIL@ADDRESS>, YEAR.
 #
 #, fuzzy
 msgid ""
 msgstr ""
-"Project-Id-Version: Fastpotify\n"
-"Report-Msgid-Bugs-To: https://github.com/crmne/fastpotify/issues/new?"
+"Project-Id-Version: Spotifast\n"
+"Report-Msgid-Bugs-To: https://github.com/crmne/spotifast/issues/new?"
 "template=translation.yml\n"
-"POT-Creation-Date: 2026-09-09 16:31+0200\n"
+"POT-Creation-Date: 2026-09-13 18:21+0200\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: LANGUAGE <LL@li.org>\n"
@@ -19,87 +19,87 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=INTEGER; plural=EXPRESSION;\n"
 
-#: src/ui/sidebar.rs:49
+#: src/ui/sidebar.rs:64
 msgid "Liked Songs"
 msgstr ""
 
-#: src/ui/sidebar.rs:52
+#: src/ui/sidebar.rs:67
 msgid "Playlist"
 msgstr ""
 
-#: src/ui/sidebar.rs:91
+#: src/ui/sidebar.rs:106
 msgid "Library order"
 msgstr ""
 
-#: src/ui/sidebar.rs:94
+#: src/ui/sidebar.rs:109
 msgid "Recently played"
 msgstr ""
 
-#: src/ui/sidebar.rs:96
+#: src/ui/sidebar.rs:111
 msgid "Name"
 msgstr ""
 
-#: src/ui/sidebar.rs:99
+#: src/ui/sidebar.rs:114
 msgid "Recently added"
 msgstr ""
 
-#: src/ui/sidebar.rs:101
+#: src/ui/sidebar.rs:116
 msgid "Local custom order"
 msgstr ""
 
-#: src/ui/sidebar.rs:104
+#: src/ui/sidebar.rs:119
 msgid "Spotify custom order"
 msgstr ""
 
-#: src/ui/sidebar.rs:503 src/i18n.rs:102 src/i18n.rs:105
+#: src/ui/sidebar.rs:518 src/i18n.rs:102 src/i18n.rs:105
 msgid "Home"
 msgstr ""
 
-#: src/ui/sidebar.rs:514
+#: src/ui/sidebar.rs:529
 msgid "Search"
 msgstr ""
 
-#: src/ui/sidebar.rs:546
+#: src/ui/sidebar.rs:561
 msgid "Library"
 msgstr ""
 
-#: src/ui/sidebar.rs:559
+#: src/ui/sidebar.rs:574
 msgid "Hide sidebar (Ctrl+B)"
 msgstr ""
 
-#: src/ui/sidebar.rs:560
+#: src/ui/sidebar.rs:575
 msgid "Hide sidebar (Cmd+B)"
 msgstr ""
 
-#: src/ui/sidebar.rs:574
+#: src/ui/sidebar.rs:589
 msgid "Create a playlist"
 msgstr ""
 
-#: src/ui/sidebar.rs:590
+#: src/ui/sidebar.rs:605
 msgid "Search Your Library"
 msgstr ""
 
-#: src/ui/sidebar.rs:608
+#: src/ui/sidebar.rs:623
 msgid "Playlists"
 msgstr ""
 
-#: src/ui/sidebar.rs:609
+#: src/ui/sidebar.rs:624
 msgid "Albums"
 msgstr ""
 
-#: src/ui/sidebar.rs:610
+#: src/ui/sidebar.rs:625
 msgid "Artists"
 msgstr ""
 
-#: src/ui/sidebar.rs:611
+#: src/ui/sidebar.rs:626
 msgid "Podcasts"
 msgstr ""
 
-#: src/ui/sidebar.rs:631
+#: src/ui/sidebar.rs:646
 msgid "Search in Your Library"
 msgstr ""
 
-#: src/ui/sidebar.rs:765
+#: src/ui/sidebar.rs:780
 msgid "Artist"
 msgstr ""
 

@@ -1,6 +1,6 @@
-# Contributing to Fastpotify
+# Contributing to Spotifast
 
-Fastpotify is a native Spotify client. Changes should improve the
+Spotifast is a native Spotify client. Changes should improve the
 desktop app without adding a browser, fallback services, or another backend.
 
 ## Before opening an issue
@@ -16,13 +16,13 @@ project.
 Some boundaries come from Spotify or from upstream libraries:
 
 - Local playback requires Spotify Premium because librespot requires it.
-- Spotify Lossless is not available through librespot. Fastpotify will
+- Spotify Lossless is not available through librespot. Spotifast will
   reconsider it if librespot gains lawful upstream support; proposals that
   depend on bypassing Spotify's DRM are out of scope.
 - Spotify tracks must come from Spotify. Substituting audio from YouTube,
   Piped, `yt-dlp`, or another catalogue is out of scope.
-- Fastpotify will not embed a browser engine, add telemetry, or introduce a
-  Fastpotify-operated service.
+- Spotifast will not embed a browser engine, add telemetry, or introduce a
+  Spotifast-operated service.
 
 [What Spotify Lets a Client Do](docs/_reference/what-spotify-allows.md)
 lists what each of the three surfaces offers and the requests none of them
@@ -36,35 +36,6 @@ A bug can be closed once its fix is on `main` and the relevant checks pass,
 with the commit and release status stated. Reporter confirmation is welcome
 but is not required for closure. Reopen the issue if it persists after updating.
 
-## Automated triage
-
-Copilot assesses new and reopened issues, new discussions, and new or edited
-comments on either. It reads the full conversation again and can update triage
-labels when new evidence changes the report. Bot activity and pull request
-comments are ignored. Reopening a closed issue remains a maintainer decision.
-
-A rocket reaction on the triggering report or comment means that assessment
-completed successfully, including its safety checks and GitHub actions. It does
-not promise a reply, acceptance, or a fix. Clear reports may only receive a
-label. Replies ask for missing information or give a useful answer or decision;
-the agent does not repeat questions already answered or post status chatter.
-An assessment must record an applied action or an explicit no-action result.
-Missing outputs and failed safety checks cannot receive a completion marker.
-
-The marker is cleared when reassessing the same item and restored only after
-success. Failures can be retried from Actions without removing reactions by
-hand. Rockets placed before this behaviour was introduced only indicated an
-attempt had started. An older rocket never prevents a new assessment.
-
-The workflow is controlled by the `COPILOT_ISSUE_ASSESSMENT_ENABLED` repository
-variable. Edit `.github/workflows/issue-assessment.md`, then regenerate its
-lockfile with `gh aw compile issue-assessment` (gh-aw v0.88.7). The companion
-`issue-assessment-complete.yml` marks successful runs. Its small subject artifact
-contains only the GitHub node ID and, for comments, the assessed edit timestamp.
-Keep the workflow's Copilot CLI version pinned. A version update must pass a
-fresh hosted assessment with a recorded result; compilation alone does not
-exercise the connection to its tools.
-
 ## Design principles
 
 1. **Native and fast.** Startup time, idle work, memory use, and binary size
@@ -74,9 +45,9 @@ exercise the connection to its tools.
 3. **Honest integrations.** Use Spotify's Web API and librespot for what they
    support. Do not scrape, impersonate capabilities, bypass technical
    protections, or silently replace one service with another.
-4. **Cross-platform by default.** Linux, macOS, and Windows are supported
-   products. Platform-specific code must be isolated and the other targets
-   must keep compiling.
+4. **Windows is the supported target.** Windows is the product this fork
+   ships and tests. Platform-specific code for other targets stays isolated
+   so the tree keeps compiling, but it is not a promised product here.
 5. **Small dependency surface.** Reuse the standard library and existing
    crates where practical. A new dependency needs a concrete benefit worth
    its build time, binary size, maintenance, and security cost.
@@ -86,7 +57,7 @@ exercise the connection to its tools.
 
 ## Pull requests
 
-Keep each pull request to one change. Explain why it belongs in Fastpotify,
+Keep each pull request to one change. Explain why it belongs in Spotifast,
 what changed, and how you tested it. Avoid unrelated formatting, refactors,
 generated prose, and large mechanical rewrites.
 
@@ -104,10 +75,32 @@ should include before/after screenshots or a short recording and should use
 demo mode where possible. User-visible behaviour, settings, files, or network
 access must be documented in the same pull request.
 
+### Visual reviews
+
+Provide an HTML comparison with actual before-and-after captures, using demo
+mode where possible. Match the data, page, interaction state, zoom and window
+size so the difference shows the proposed change. Identify the baseline and
+candidate, and report which platforms actually produced the captures.
+
+Include light/dark and narrow/normal window selectors, plus Before and After
+buttons or a comparison slider. Show relevant open menus, loading, error and
+empty states. Explain the visible change briefly and list any remaining checks.
+
+When reviewing several changes, provide one index with the PR number and name,
+a selector and Previous/Next controls, and a direct link to each comparison.
+Load only the selected review. The maintainer can approve by PR number and
+give exceptions or requested adjustments in a normal message.
+
+Visual approval covers the described appearance and interaction; integration
+still requires the relevant checks. Retain approval across rebases that preserve
+that scope. Implement explicitly requested adjustments and update the evidence;
+ask again only if the resulting scope goes beyond what was approved or requested.
+
+### Checks
+
 Run the same checks CI runs before submitting:
 
 ```sh
-node --test .github/scripts/issue-assessment.test.cjs
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo clippy --locked --all-targets --all-features -- -D warnings
@@ -115,43 +108,36 @@ cargo test --locked --all-targets
 cargo test --locked --all-targets --all-features
 cargo test --locked --all-features --doc
 RUSTDOCFLAGS='-D warnings' cargo doc --locked --all-features --no-deps
-(cd docs && bundle exec jekyll build)
 ```
 
-Linux needs the development packages listed in the README; `nix develop`
-provides the complete development environment. MilkDrop builds libprojectM
-from source, so every platform also needs CMake, a C++ compiler, and
-libclang (on Windows, vcpkg with `glew:x64-windows-static` installed and
-`VCPKG_INSTALLATION_ROOT` pointing at it); `--no-default-features` leaves
-MilkDrop out and needs none of that. CI repeats the test suite on Linux,
-macOS, and Windows. Passing CI is required, but does not replace review
-for correctness, product fit, maintainability, or security.
+This fork targets Windows. MilkDrop builds libprojectM from source, so a
+Windows checkout needs CMake, a C++ compiler, libclang, and vcpkg with
+`glew:x64-windows-static` installed and `VCPKG_INSTALLATION_ROOT` pointing at
+it; `--no-default-features` leaves MilkDrop out and needs none of that.
+CI runs the suite on Windows. Passing CI is required, but does not replace
+review for correctness, product fit, maintainability, or security.
 
 Credential-storage changes also need a native store round trip. With the
-desktop keyring unlocked, run
+desktop credential store unlocked, run
 `cargo test --locked --lib credentials::tests::native_store_round_trip -- --ignored --exact`.
 It uses temporary dummy grants and deletes them afterward. CI runs this check
-on macOS and Windows; Linux requires an available Secret Service provider.
-The ordinary test suite uses an isolated fake store and never reads a real
-Spotify grant. Demo mode also skips credential restoration.
-
-Flatpak state-persistence changes also need
-`packaging/flatpak/test-state.sh`. It requires Flatpak, Ruby, and an installed
-Platform runtime, and checks both manifests using disposable dummy state.
-Pass a runtime and branch to use an existing installation, for example
-`packaging/flatpak/test-state.sh org.kde.Platform 6.9`.
+on Windows. The ordinary test suite uses an isolated fake store and never
+reads a real Spotify grant. Demo mode also skips credential restoration.
 
 Translation changes also need `.github/scripts/update-translations.sh --check`,
 using GNU gettext tools with Rust support. Run the script without `--check` when
 translatable source strings change, and review any fuzzy or missing entries in
 the updated PO files. Normal Cargo builds compile the catalogs without gettext
-tools. See [Translating Fastpotify](docs/_reference/translating.md) for the pilot
+tools. See [Translating Spotifast](docs/_reference/translating.md) for the pilot
 scope and contributor workflow.
 
-When changing `Cargo.lock` or `flake.nix`, also verify `nix build .#default`
-on a Nix host or wait for the Nix CI job. A package-version-only lockfile
-change can change the vendor hash. Releases must wait for all required CI
-jobs on the version commit before the tag is pushed.
+Documentation deployments take their canonical URL from the domain configured
+in GitHub Pages. When changing domains, configure DNS and GitHub Pages before
+redeploying; the previous hostname keeps working until that switch. Renamed
+guides use `jekyll-redirect-from` to preserve their old URLs.
+
+Releases must wait for all required CI jobs on the version commit before the
+tag is pushed.
 
 By contributing, you agree that your contribution is licensed under the
 project's MIT License.

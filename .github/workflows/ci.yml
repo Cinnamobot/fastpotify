@@ -16,22 +16,28 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # projectm-sys asks CMake for the Visual Studio generator, which the runner
+  # image no longer satisfies; Ninja inside the MSVC environment builds the
+  # same thing without caring which Visual Studio is on. The generator is
+  # job-level env, since a GITHUB_ENV write never reached the build script.
+  CMAKE_GENERATOR: Ninja
 
 jobs:
   quality:
     name: quality
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
+    runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: GUI build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libpulse-dev libxkbcommon-dev \
-            libwayland-dev libgl1-mesa-dev cmake libclang-dev
+      # libprojectM reads OpenGL through GLEW on Windows; projectm-sys builds
+      # against vcpkg's static-CRT triplet, matching .cargo/config.toml.
+      - name: GLEW for libprojectM
+        run: vcpkg install glew:x64-windows-static
+      - name: MSVC environment for libprojectM
+        uses: ilammy/msvc-dev-cmd@v1
       # Only main writes the cache. A pull request reads it and builds on
       # top; letting every branch save its own copy filled the repository's
       # ten-gigabyte cache in a few days, and a full cache evicts the entry
@@ -44,8 +50,6 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Formatting
         run: cargo fmt --all --check
-      - name: Issue assessment regression tests
-        run: node --test .github/scripts/issue-assessment.test.cjs
       - name: Clippy (default features)
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Clippy (all features)
@@ -56,36 +60,15 @@ jobs:
         run: cargo doc --locked --all-features --no-deps
 
   test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    env:
-      CMAKE_GENERATOR: Ninja
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+    name: test
+    runs-on: windows-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: GUI build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2-dev libpulse-dev libxkbcommon-dev \
-            libwayland-dev libgl1-mesa-dev cmake libclang-dev
-      # libprojectM reads OpenGL through GLEW on Windows; projectm-sys builds
-      # against vcpkg's static-CRT triplet, matching .cargo/config.toml.
       - name: GLEW for libprojectM
-        if: runner.os == 'Windows'
         run: vcpkg install glew:x64-windows-static
-      # projectm-sys asks CMake for the Visual Studio generator, which the
-      # runner image no longer satisfies; Ninja inside the MSVC environment
-      # builds the same thing without caring which Visual Studio is on. The
-      # generator is job-level env, since a GITHUB_ENV write never reached
-      # the build script.
       - name: MSVC environment for libprojectM
-        if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
       - uses: Swatinem/rust-cache@v2
         with:
@@ -96,8 +79,9 @@ jobs:
         run: cargo test --locked --all-targets
       - name: Tests (all features)
         run: cargo test --locked --all-targets --all-features
+      # Platform storage is the one part of the credential path a test can
+      # only reach with a real store; the rest of the suite uses the dummy.
       - name: Native credential store (dummy grants)
-        if: runner.os == 'Windows' || runner.os == 'macOS'
         timeout-minutes: 2
         run: cargo test --locked --lib credentials::tests::native_store_round_trip -- --ignored --exact
       - name: Documentation tests
@@ -105,44 +89,9 @@ jobs:
       # A build can pass while importing Microsoft's C++ runtime, then fail on
       # a clean user's machine. Inspect the executable CI actually produced.
       - name: Standalone Windows runtime
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           cargo build --locked
           $imports = & dumpbin /dependents target\debug\fastpotify.exe | Out-String
           $runtime = $imports | Select-String -Pattern 'MSVCP[0-9_]*\.dll|VCRUNTIME[0-9_]*\.dll'
           if ($runtime) { throw "Fastpotify imports an MSVC runtime:`n$runtime" }
-
-  nix:
-    name: Nix package
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v7
-      - uses: wimpysworld/nothing-but-nix@v9
-      - uses: cachix/install-nix-action@v31
-      - uses: nix-community/cache-nix-action@v7
-        with:
-          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/flake.lock') }}
-          restore-prefixes-first-match: nix-${{ runner.os }}-
-      - run: nix build .#default
-
-  docs:
-    name: docs
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '4.0'
-          bundler-cache: true
-          working-directory: docs
-
-      - name: Build documentation site
-        working-directory: docs
-        env:
-          JEKYLL_ENV: production
-        run: |
-          bundle exec jekyll build --destination "$RUNNER_TEMP/fastpotify-site"

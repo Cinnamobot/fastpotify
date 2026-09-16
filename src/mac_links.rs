@@ -1,7 +1,7 @@
 //! Spotify links macOS hands the app.
 //!
-//! An app registered for the `spotify` scheme (`CFBundleURLTypes` in
-//! `packaging/macos/Info.plist`) gets each link as an Apple Event, never on
+//! An app registered for the `spotify` scheme (`CFBundleURLTypes` in its
+//! `Info.plist`) gets each link as an Apple Event, never on
 //! the command line: the one it was launched for as well as the ones that
 //! arrive while it runs. The handler here puts each on the running
 //! instance's command queue, where it is treated like a link from any

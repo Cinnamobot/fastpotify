@@ -1,11 +1,13 @@
 [package]
+# Keep the Cargo package identity for existing cargo-install users.
 name = "fastpotify"
-version = "0.7.1"
+default-run = "spotifast"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
 description = "A native Spotify client"
-repository = "https://github.com/crmne/fastpotify"
+repository = "https://github.com/crmne/spotifast"
 keywords = ["spotify", "music", "egui", "librespot", "player"]
 categories = ["multimedia::audio"]
 
@@ -13,6 +15,11 @@ categories = ["multimedia::audio"]
 name = "fastpotify"
 path = "src/lib.rs"
 
+[[bin]]
+name = "spotifast"
+path = "src/spotifast.rs"
+
+# Compatibility command for scripts and the updater in earlier releases.
 [[bin]]
 name = "fastpotify"
 path = "src/main.rs"
@@ -74,7 +81,7 @@ raw-window-handle = "0.6"
 # librespot-core depends on hyper-proxy2 for HTTP proxy support, whose only
 # published release (0.1.0) pins rustls 0.22 and so drags in rustls-webpki
 # 0.102, which carries advisories against its CRL and name-constraint
-# handling. Fastpotify never configures a proxy (SessionConfig.proxy stays
+# handling. Spotifast never configures a proxy (SessionConfig.proxy stays
 # None), so that TLS client is compiled in but never used to verify anything.
 # Every connection this app actually makes (the Web API through reqwest, and
 # librespot's own sessions) goes through rustls 0.23 with a patched

@@ -24,7 +24,7 @@ pub enum DownloadState {
     Failed(String),
 }
 
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/crmne/fastpotify/releases/latest";
+const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/crmne/spotifast/releases/latest";
 
 /// Update-check interval.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);

@@ -38,7 +38,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
                     let (logo, _) = ui.allocate_exact_size(Vec2::splat(72.0), egui::Sense::hover());
                     theme::logo(ui, logo.center(), 72.0, palette.accent, palette.on_accent);
                     ui.add_space(6.0);
-                    theme::text(ui, "Fastpotify", theme::bold(30.0), palette.text);
+                    theme::text(ui, "Spotifast", theme::bold(30.0), palette.text);
                     theme::text(ui, "A native Spotify client.", theme::regular(14.5), palette.secondary);
                     ui.add_space(22.0);
                     match &app.auth {
@@ -99,7 +99,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
                             ui.add_space(10.0);
                             ui.add(
                                 egui::Label::new(
-                                    egui::RichText::new("Sign in through your browser. Fastpotify never sees your password. Local playback needs Spotify Premium.")
+                                    egui::RichText::new("Sign in through your browser. Spotifast never sees your password. Local playback needs Spotify Premium.")
                                         .font(theme::regular(12.5))
                                         .color(palette.secondary),
                                 )
@@ -130,7 +130,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
             ui.painter().text(
                 egui::pos2(rect.center().x, rect.bottom() - 24.0),
                 egui::Align2::CENTER_BOTTOM,
-                format!("Fastpotify {} • not affiliated with Spotify", env!("CARGO_PKG_VERSION")),
+                format!("Spotifast {} • not affiliated with Spotify", env!("CARGO_PKG_VERSION")),
                 theme::regular(11.5),
                 palette.dim,
             );

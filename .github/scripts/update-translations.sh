@@ -13,8 +13,8 @@ xgettext --language=Rust --from-code=UTF-8 \
     --keyword= --keyword=gettext:2 --keyword=ngettext:2,3 \
     --add-comments=Translators: \
     --flag=ngettext:2:rust-format --flag=ngettext:3:rust-format \
-    --package-name=Fastpotify --copyright-holder='Fastpotify contributors' \
-    --msgid-bugs-address='https://github.com/crmne/fastpotify/issues/new?template=translation.yml' \
+    --package-name=Spotifast --copyright-holder='Spotifast contributors' \
+    --msgid-bugs-address='https://github.com/crmne/spotifast/issues/new?template=translation.yml' \
     --files-from=assets/i18n/POTFILES --output="$translation_template"
 if [[ "$mode" == --check ]]; then
     # The extraction timestamp is the only nondeterministic header.

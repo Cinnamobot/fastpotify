@@ -1,4 +1,4 @@
-//! Linux desktop media controls (MPRIS) for Fastpotify.
+//! Linux desktop media controls (MPRIS) for Spotifast.
 //!
 //! D-Bus runs on its own thread with a local executor and exchanges bounded
 //! messages with the interface, which stays the only owner of playback
@@ -111,7 +111,7 @@ async fn run(
     wake: std::sync::Arc<dyn Fn() + Send + Sync>,
 ) -> mpris_server::zbus::Result<()> {
     let player = Player::builder("fastpotify")
-        .identity("Fastpotify")
+        .identity("Spotifast")
         .desktop_entry(desktop_entry())
         .can_raise(true)
         .can_quit(true)

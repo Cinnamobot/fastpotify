@@ -2,7 +2,7 @@
 //!
 //! librespot's rodio sink panics if no output device is available. Release
 //! builds abort on that panic. This sink opens the device when playback starts
-//! and reports failures through the UI. Fastpotify can then remain available
+//! and reports failures through the UI. Spotifast can then remain available
 //! as a Connect remote until an output appears.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -15,6 +15,7 @@ use librespot_playback::audio_backend::{Sink, SinkError, SinkResult};
 use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
 use librespot_playback::mixer::VolumeGetter;
+use librespot_playback::player::PlayerEvent;
 use librespot_playback::{NUM_CHANNELS, SAMPLE_RATE};
 use rodio::Source;
 
@@ -58,6 +59,8 @@ pub const BUFFER_MS_RANGE: std::ops::RangeInclusive<u32> = 20..=500;
 /// leaves the old queued audio in front of the replacement. The old signal is
 /// faded on rodio's output thread before its queue is discarded; writes stay
 /// gated until librespot reports that the replacement track is loaded.
+/// A confirmed seek also discards queued audio, without gating packets from
+/// the decoder that has already moved to the requested position.
 pub struct AudioControl {
     target: Mutex<AudioTarget>,
     waiting_for_track: AtomicBool,
@@ -79,6 +82,27 @@ impl AudioControl {
             reset_output: AtomicBool::new(false),
             buffer_ms: buffer_ms.clamp(*BUFFER_MS_RANGE.start(), *BUFFER_MS_RANGE.end()),
         })
+    }
+
+    /// Follows confirmed decoder transitions, including seeks requested by
+    /// another Spotify client. Natural track changes retain gapless audio.
+    pub(crate) fn handle_player_event(&self, event: &PlayerEvent) {
+        match event {
+            PlayerEvent::TrackChanged { .. } => self.track_changed(),
+            PlayerEvent::Seeked { .. } => {
+                let target = self.target.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(sink) = target.sink.upgrade() {
+                    sink.stop();
+                }
+                self.reset_output.store(true, Ordering::SeqCst);
+                // Previous can rewind the current track after interrupting
+                // it. Release that gate, but never close it for a seek:
+                // the decoder is already sending audio from the new position.
+                self.track_changed();
+            }
+            PlayerEvent::Stopped { .. } => self.stopped(),
+            _ => {}
+        }
     }
 
     /// Fades and discards the current output before a user-requested track
@@ -909,6 +933,106 @@ mod tests {
         }
         assert_eq!(envelope.next_gain(), 0.0);
         assert!(envelope.silent());
+    }
+
+    #[test]
+    fn confirmed_seek_discards_the_old_position_without_gating_new_packets() {
+        let control = AudioControl::new(DEFAULT_BUFFER_MS);
+        let (sink, mut output) = rodio::Sink::new();
+        let sink = Arc::new(sink);
+        let (interrupt, transport) = wide_open();
+        let queued = Queued::new();
+        control.register(&sink, Arc::clone(&interrupt));
+        sink.append(chunk(500, &interrupt, &transport, &queued));
+        assert_eq!(output.next(), Some(1.0));
+
+        control.handle_player_event(&PlayerEvent::Seeked {
+            play_request_id: 1,
+            track_id: librespot_core::SpotifyUri::from_uri("spotify:track:14XWXWv5FoCbFzLksawpEe")
+                .unwrap(),
+            position_ms: 90_000,
+        });
+
+        // Rodio checks stop every 5 ms of output. After that, none of the
+        // half-second of sound from before the seek may still play.
+        output
+            .by_ref()
+            .take(20 * NUM_CHANNELS as usize)
+            .for_each(drop);
+        assert!(output.take(50).all(|sample| sample == 0.0));
+        assert_eq!(queued.frames(), 0);
+        assert!(!control.waiting_for_track());
+        assert!(control.take_reset(), "the next packet gets a fresh queue");
+    }
+
+    #[test]
+    fn track_changes_and_position_updates_preserve_gapless_queued_audio() {
+        use librespot_metadata::audio::item::{AudioItem, UniqueFields};
+
+        let control = AudioControl::new(DEFAULT_BUFFER_MS);
+        let (sink, mut output) = rodio::Sink::new();
+        let sink = Arc::new(sink);
+        let (interrupt, transport) = wide_open();
+        control.register(&sink, Arc::clone(&interrupt));
+        sink.append(chunk(500, &interrupt, &transport, &Queued::new()));
+        assert_eq!(output.next(), Some(1.0));
+        let track_id =
+            librespot_core::SpotifyUri::from_uri("spotify:track:14XWXWv5FoCbFzLksawpEe").unwrap();
+        let item = AudioItem {
+            track_id: track_id.clone(),
+            uri: track_id.to_uri().unwrap(),
+            files: Default::default(),
+            name: "Next song".into(),
+            covers: vec![],
+            language: vec![],
+            duration_ms: 200_000,
+            is_explicit: false,
+            availability: Ok(()),
+            alternatives: None,
+            unique_fields: UniqueFields::Track {
+                artists: Default::default(),
+                album: "Album".into(),
+                album_artists: vec![],
+                popularity: 0,
+                number: 1,
+                disc_number: 1,
+            },
+        };
+        for event in [
+            PlayerEvent::TrackChanged {
+                audio_item: Box::new(item),
+            },
+            PlayerEvent::PositionCorrection {
+                play_request_id: 1,
+                track_id: track_id.clone(),
+                position_ms: 100,
+            },
+            PlayerEvent::PositionChanged {
+                play_request_id: 1,
+                track_id,
+                position_ms: 200,
+            },
+        ] {
+            control.handle_player_event(&event);
+            assert!(output.by_ref().take(100).all(|sample| sample == 1.0));
+            assert!(!control.take_reset());
+        }
+    }
+
+    #[test]
+    fn a_previous_that_rewinds_releases_the_interrupted_track_gate() {
+        let control = AudioControl::new(DEFAULT_BUFFER_MS);
+        control.interrupt();
+        assert!(control.waiting_for_track());
+
+        control.handle_player_event(&PlayerEvent::Seeked {
+            play_request_id: 1,
+            track_id: librespot_core::SpotifyUri::from_uri("spotify:track:14XWXWv5FoCbFzLksawpEe")
+                .unwrap(),
+            position_ms: 0,
+        });
+        assert!(!control.waiting_for_track());
+        assert!(control.take_reset());
     }
 
     #[test]

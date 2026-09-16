@@ -1,25 +1,25 @@
 ---
 layout: home
-title: Fastpotify
+title: Spotifast
 description: A fast, native Spotify client for Linux, macOS, and Windows, written in Rust.
 permalink: /
 hero:
-  name: Fastpotify
+  name: Spotifast
   text: Spotify, native and fast
-  tagline: A lightweight Spotify client with local playback, library access, and Spotify Connect controls for Linux, macOS, and Windows.
+  tagline: Formerly Fastpotify. A lightweight Spotify client with local playback, library access, and Spotify Connect controls for Linux, macOS, and Windows.
   actions:
     - theme: brand
       text: Download
       link: /download/
     - theme: alt
-      text: What is Fastpotify?
-      link: /what-is-fastpotify/
+      text: What is Spotifast?
+      link: /what-is-spotifast/
     - theme: alt
       text: GitHub
-      link: https://github.com/crmne/fastpotify
+      link: https://github.com/Cinnamobot/fastpotify
   image:
     src: /screenshot.png
-    alt: "Fastpotify Home with the playlist library, recommendations, queue, and player visible"
+    alt: "Spotifast Home with the playlist library, recommendations, queue, and player visible"
     width: 2018
     height: 1198
 
@@ -52,7 +52,7 @@ features:
   - icon: 🔓
     title: Open source
     details: MIT-licensed Rust built with egui and librespot. The docs explain its connections and stored credentials.
-    link: https://github.com/crmne/fastpotify
+    link: https://github.com/Cinnamobot/fastpotify
     link_text: Read the source
 ---
 
@@ -69,12 +69,12 @@ scaling. [See the mini player in detail](/winamp/).
 
 ## MilkDrop with more than 10,000 presets
 
-On first use, Fastpotify automatically downloads the original MilkDrop 2
+On first use, Spotifast automatically downloads the original MilkDrop 2
 presets and projectM's Cream of the Crop collection. They react to local
 playback in a resizable window or fullscreen.
 [See the controls and preset details](/milkdrop/).
 
-<video class="milkdrop-showcase" autoplay loop muted playsinline preload="metadata" poster="/assets/images/milkdrop-poster.jpg" aria-label="MilkDrop presets reacting to music in Fastpotify">
+<video class="milkdrop-showcase" autoplay loop muted playsinline preload="metadata" poster="/assets/images/milkdrop-poster.jpg" aria-label="MilkDrop presets reacting to music in Spotifast">
   <source src="/assets/images/milkdrop.mp4" type="video/mp4">
 </video>
 

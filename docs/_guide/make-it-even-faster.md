@@ -6,7 +6,7 @@ nav_order: 6
 
 ## API rate limits
 
-Fastpotify loads library and catalogue data through Spotify's Web API. By
+Spotifast loads library and catalogue data through Spotify's Web API. By
 default, it shares a public app with several other open-source players. When
 that app reaches Spotify's request limit, requests are delayed and the top bar
 shows a spinner.
@@ -33,7 +33,7 @@ access, and a personal app has its own limits.
 Spotify keeps a personal app in Development Mode, and since February 2026 that
 mode omits Spotify-owned playlists and reads playlist items only for playlists
 you own or collaborate on. Artist top tracks, related artists,
-recommendations, and some catalog fields are unavailable too. Fastpotify uses
+recommendations, and some catalog fields are unavailable too. Spotifast uses
 the shared app for the complete playlist library, the playlist results in a
 search, external playlist metadata and items, and those unavailable operations.
 Your app handles supported requests, including the songs, artists, albums,
@@ -42,6 +42,12 @@ looks up the playlists. Each half of a search appears as soon as it arrives, so
 songs are not held up when the shared app is busy. Your app returns ten results
 for each type where the shared app returns twenty, a Development Mode limit.
 The shared app handles the rest.
+
+Playlists are the exception. While local playback is signed in, Spotifast
+reads the ones the shared app would serve, other people's and, without a
+personal app, your own, over the same connection that streams the audio, as
+Spotify's own apps do, so they open without waiting on the shared app's quota
+at all.
 
 ## Make a Spotify app
 
@@ -61,12 +67,12 @@ The shared app handles the rest.
 
 ![Settings, with a personal Spotify app in use](/assets/images/make-it-even-faster.png)
 
-## Use it in Fastpotify
+## Use it in Spotifast
 
 1. Open **Settings**, find **Personal Spotify app**, and paste the
    Client ID.
 2. Click **Authorize**. Your browser opens Spotify's sign-in for your app.
-   Fastpotify verifies that it belongs to the same Spotify account, then shows
+   Spotifast verifies that it belongs to the same Spotify account, then shows
    **Personal app ready**.
 
 This does not affect local playback. Select **Remove** to delete the personal

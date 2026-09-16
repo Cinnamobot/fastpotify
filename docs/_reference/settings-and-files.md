@@ -1,12 +1,18 @@
 ---
 title: Settings & Files
-description: Where Fastpotify keeps configuration, credentials, and caches, and what is safe to delete.
+description: Configuration, credential and cache locations, and what is safe to delete.
 nav_order: 0
 ---
 
 ## Where things live
 
-Fastpotify follows each platform's conventions. On Linux:
+Spotifast was previously called Fastpotify. The existing `fastpotify` file
+paths, credential-store IDs and desktop integration IDs stay the same, so the
+rename does not require signing in again or moving your settings. Both
+`spotifast` and `fastpotify` commands control the same running app. Saved Spotify
+Connect device names remain unchanged; new settings default to `Spotifast`.
+
+Spotifast follows each platform's conventions. On Linux:
 
 | What | Where | Safe to delete? |
 | --- | --- | --- |
@@ -51,10 +57,10 @@ used for this session, with no new plaintext fallback file.
 On upgrade, each legacy grant is written to the protected store and read back
 before its old file is removed. Valid grants migrate without signing in again.
 If Spotify rejects a saved refresh grant, only that grant is forgotten so the
-next launch cannot keep restoring it. If migration fails, Fastpotify reports it and
+next launch cannot keep restoring it. If migration fails, Spotifast reports it and
 keeps the original so migration can be retried. That grant can still serve the
 current session. A successfully migrated grant is never replaced by a stale
-legacy copy. Librespot's reusable grant stays in memory until Fastpotify saves
+legacy copy. Librespot's reusable grant stays in memory until Spotifast saves
 it through this same store. Volume and disposable audio caches are independent.
 
 Sign-out invalidates pending authorization, refresh, and playback connections,
@@ -75,11 +81,19 @@ and diagnostic uploads.
 
 Progress through a playlist is periodically cached as a contiguous prefix.
 When the playlist has not changed on Spotify, reopening it resumes from that
-prefix instead of requesting the same pages again. Fastpotify validates the
-cache against Spotify's playlist snapshot before showing it.
+prefix instead of requesting the same pages again. Spotifast validates the
+cache against Spotify's playlist snapshot and reported song count before
+showing it. A cache with a mismatched count is replaced by live rows even if
+its snapshot matches, so stale cached songs cannot choose the playback order.
 Successful playlist edits keep that loaded prefix and save it under Spotify's
-new snapshot. Fastpotify reloads the playlist only if the write fails and the
-optimistic edit must be reconciled.
+new snapshot after all pending writes have succeeded. Pending edits remain
+visible immediately, but are not saved as confirmed playlist rows. A failed
+write reloads the playlist to reconcile the edit.
+
+On `main`, after 0.7.1, playlist checkpoints stream their JSON to a temporary
+file on a background file worker. Saving a large playlist no longer needs a
+second complete JSON buffer in memory. The cache format and checkpoint order
+are unchanged, and a failed write leaves the previous cache in place.
 
 The following Liked Songs caching behavior is on `main`, for the release
 after 0.7.1.
@@ -112,10 +126,25 @@ may ignore saved positions. On Windows, a position
 whose title bar is no longer on an available monitor's work area is discarded
 when reopening the window, keeping its initial on-screen placement instead.
 
+On `main`, for the release after 0.7.1, a main window left maximized or full
+screen reopens that way, and comes back that way from the mini player. The
+remembered size and position describe an ordinary window and are not applied
+to one that already fills the screen, because sizing or moving such a window
+restores it down.
+
+On `main`, after 0.7.1, album and playlist scrollbars reserve the full track count
+as soon as Spotify reports it. Dragging to an unloaded section shows placeholders and requests
+that section directly. Loaded windows stay in memory while the page is retained;
+returning to one does not download it again. Unavailable entries keep their row
+positions. Playlist edits and refreshes invalidate other cached windows because
+their server positions may have changed. Only contiguous playlist prefixes are
+saved on disk.
+
 Large playlist pages also have a **Go to song** control. Entering a song
-number loads its 50-item page directly, without requesting every earlier page.
-Filtering or sorting still covers the whole playlist, so either action returns
-to the beginning and loads the remaining pages as needed.
+number scrolls to that row and loads its 50-item page if needed. Filtering or
+sorting returns to the beginning and loads remaining pages as needed, since
+local search and ordering require the track metadata. A failed window stops
+automatic requests and shows a Retry button in the reserved row space.
 
 On `main`, for the release after 0.7.1, Flatpak also preserves the fallback
 state directory used when `XDG_STATE_HOME` is unset. Session state, history,
@@ -138,14 +167,17 @@ main fields are:
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `device_name` | `Fastpotify` | Name on Spotify Connect |
+| `device_name` | `Spotifast` | Name on Spotify Connect |
 | `bitrate` | `320` | 96, 160, or 320 kbps |
 | `normalisation` | `false` | Volume normalisation |
 | `autoplay` | `true` | Keep playing similar music at the end |
 | `gapless` | `true` | Gapless playback |
 | `audio_backend` | platform | `pulseaudio` or `rodio` on Linux |
 | `audio_cache_mb` | `1024` | On-disk audio cache budget |
-| `theme` | `dark` | `dark`, `light`, or `system` |
+| `theme` | `system` | Follow the system appearance by default; explicit `dark` and `light` choices remain available |
+| `custom_theme` | `null` | Selected JSON filename from the `themes` folder |
+| `custom_theme_cache` | absent | Last accepted custom palette; preserves appearance if its file is missing or invalid |
+| `system_theme_cache` | absent | Last accepted Omarchy palette for Follow system; retained across restarts |
 | `accent_from_art` | `true` | Tint pages with album art |
 | `library_sort` | `{}` | Per-section Library order overrides, after 0.7.1: `library`, `recently_played`, `name`, `recently_added`, `local`, or `spotify`, where supported |
 | `sidebar_order` | `[]` | Saved local playlist arrangement, including an unpinned Liked Songs, retained when another sort is selected |
@@ -184,7 +216,7 @@ main fields are:
 ## Command line
 
 ```
-fastpotify [OPTIONS] [LINK]
+spotifast [OPTIONS] [LINK]
 
   LINK                  A Spotify link to open: spotify:track:…, or an
                         open.spotify.com address
@@ -192,12 +224,12 @@ fastpotify [OPTIONS] [LINK]
   -v, --verbose         More logs from librespot and the API client
 ```
 
-A link goes to the running Fastpotify when there is one, which then opens
+A link goes to the running Spotifast when there is one, which then opens
 the page and brings its window forward; otherwise the app starts on it. The
 desktop's handler for `spotify:` links runs exactly this.
 
 Attach `fastpotify.log` from the state directory to bug reports. It contains
-the last run's output, including extra lines from `fastpotify -v`. After a
+the last run's output, including extra lines from `spotifast -v`. After a
 crash, attach `panic.log` too.
 
 ## Demo mode
@@ -222,5 +254,148 @@ cargo run --release --features demo -- \
 ```
 
 The image uses the current window size. `--demo-size WIDTHxHEIGHT` sets that
-size for a shot (for example `760x800` or `1240x800`). `--demo-shot-delay <MS>`
-sets how long to wait for cover art before taking it.
+size in logical pixels for a shot (for example `760x800` or `1240x800`).
+`--demo-shot-delay <MS>` sets how long to wait for cover art before taking it.
+On `main`, after 0.7.1, demo windows ignore saved window geometry and do not
+read or save the normal window's framework state. Existing built-in appearance
+settings still apply. `--demo-data <DIRECTORY>` keeps demo caches and logs under
+that directory's `cache` and `state` folders, with settings read from `config`.
+Custom palettes and their cache are used only with an explicit `--demo-data`
+directory; the ordinary demo does not scan your real themes folder.
+
+## Home shelves
+
+On `main`, after 0.7.1, you can hide **Made for you** and **Recommended for you**
+from Home independently. Quit Spotifast before editing `settings.json`, then
+restart it. Add this field to hide both:
+
+```json
+"home": {
+  "made_for_you": { "visible": false },
+  "recommendations": { "visible": false }
+}
+```
+
+Set either `visible` value to `true` to show that shelf again. Omitted
+preferences keep both shelves visible. Other Home sections keep their normal
+order and contents. This changes what is displayed; hidden shelves still
+refresh in the background.
+
+## Custom themes
+
+Create a `themes` folder beside `settings.json` and put JSON files in it.
+Run `spotifast reload-themes` if the app is already open, then select the
+filename under **Settings → Appearance → Theme**.
+The default is **Follow system**. It uses your desktop’s light/dark appearance,
+or the current Omarchy palette on a packaged Omarchy installation. Saved Dark,
+Light and custom choices are preserved when updating. The picker starts with
+**Follow system**, **Light**, and **Dark**, then a separator. **Omarchy** comes
+next when the integration is available, followed by the other local palettes.
+Themes change colors and keep the app's existing fonts.
+The **Open themes folder** icon button beside the picker creates the folder if
+needed and opens it in your file
+manager, using the same button style as the Winamp skins folder.
+After adding or editing a JSON file, run `spotifast reload-themes` to refresh
+the list and the selected palette without restarting playback.
+Choosing a built-in theme clears the custom selection.
+
+For example, `themes/gruvbox.json`:
+
+```json
+{
+  "base": "dark",
+  "colors": {
+    "window": "#282828",
+    "panel": "#1d2021",
+    "surface": "#32302f",
+    "text": "#ebdbb2",
+    "accent": "#b8bb26"
+  }
+}
+```
+
+`base` is `dark` (the default) or `light`. Omitted colors inherit that palette.
+Supported colors are `window`, `panel`, `surface`, `surface_hover`,
+`surface_active`, `outline`, `text`, `secondary`, `dim`, `accent`,
+`accent_hover`, `on_accent`, `danger`, `warning`, `overlay`, and `shadow`.
+Values must be `#RRGGBB` or `#RRGGBBAA`.
+
+Files are read in the background at launch and when `spotifast reload-themes`
+is called. The command updates the selected palette without interrupting
+playback, changing your selection or showing the window. It does not start a
+stopped app. Repeated requests are combined while a scan is running, and no
+continuous file watcher or polling timer is added. Use regular UTF-8 `.json` files, not symbolic links or
+subdirectories. Each file is limited to 64 KiB. Keep at most 128 JSON files and
+512 total entries in the themes folder; the saved selection is still checked
+when a folder exceeds these limits.
+
+Invalid files are skipped with a warning in the log. Spotifast remembers the
+last accepted custom palette in `settings.json`. If the selected file is
+removed or becomes invalid, that appearance stays in place, including after
+a restart, and the Theme row explains the problem. Other preferences are
+preserved. A custom selection without any usable cached colors uses the
+built-in choice. Choosing Dark, Light or Follow system clears the custom
+selection and its cache. Editing or deleting the optional cache does not
+reset unrelated settings.
+
+A custom palette's `base` controls both its inherited colors and the light or
+dark styling of standard controls. Album-art tinting remains an independent
+setting; turn it off for fixed colors throughout. Palettes apply to the main
+window; Winamp skins remain separate. This first format controls colors only.
+
+### Follow an Omarchy theme
+
+On `main`, after 0.7.1, native Linux packages include the Omarchy integration.
+The first normal launch on an Omarchy desktop installs its template and
+theme-change hook in your user configuration, in the background. No copy
+commands or desktop restart are needed. A palette for the current theme is
+prepared without reapplying your desktop theme. New installations use
+**Follow system**, so Omarchy colours apply automatically on the first launch
+and track later theme changes. An existing explicit Dark, Light or custom
+choice stays selected. Choose **Follow system** or **Omarchy** under
+**Settings → Appearance → Theme** to follow Omarchy instead.
+
+Setup never replaces an existing template, hook or palette, and never changes
+your selected theme. Other users are set up independently when they launch the
+app. Demo mode, portable archives and Cargo builds do not perform automatic
+setup. A package uninstall removes the shared integration assets; your user
+configuration remains, like the rest of your preferences.
+
+For a manual installation, the repository includes an
+[Omarchy template](https://github.com/crmne/spotifast/blob/main/contrib/omarchy/spotifast.json.tpl)
+and a [theme-change hook](https://github.com/crmne/spotifast/blob/main/contrib/omarchy/spotifast-theme).
+Omarchy resolves its light/dark mode and colors through its
+[template system](https://omarchy.org/manual/making-your-own-theme/).
+The hook copies the result atomically into `themes/omarchy.json`, then asks a
+running Spotifast to reload it. It does not change your desktop theme or your
+Spotifast selection itself.
+
+For portable or Cargo installations, install the two files from a checkout:
+
+```sh
+mkdir -p ~/.config/omarchy/themed
+install -m 644 contrib/omarchy/spotifast.json.tpl ~/.config/omarchy/themed/
+omarchy hook install theme-set contrib/omarchy/spotifast-theme
+```
+
+Apply a theme through Omarchy's theme picker, then select **Omarchy** in
+Spotifast's **Settings → Appearance → Theme** once. Later Omarchy changes update
+that palette while music keeps playing. Turn off album-art tinting if every
+page should keep the theme's fixed colors.
+
+The hook uses Omarchy's current theme at
+`~/.local/state/omarchy/current/theme` and Spotifast's existing
+`${XDG_CONFIG_HOME:-~/.config}/fastpotify/themes` directory. The retained
+`fastpotify` directory is intentional. A custom profile can set
+`SPOTIFAST_THEMES_DIR` in the installed hook; this example uses the native
+`spotifast` command, not a Flatpak launcher. Themes without `colors.toml` need
+their own `spotifast.json` file. Missing or invalid palettes leave the last
+accepted appearance in place.
+
+To stop following Omarchy, choose Dark, Light or another custom theme in Spotifast.
+For a manual installation, remove only
+`~/.config/omarchy/hooks/theme-set.d/spotifast-theme` and
+`~/.config/omarchy/themed/spotifast.json.tpl`. Other hooks remain in place.
+Packaged launches recreate missing integration files. To disable the hook
+while keeping the package installed, leave that hook file empty instead;
+existing user files are preserved. Selecting Dark or Light is sufficient to stop following Omarchy's colors.

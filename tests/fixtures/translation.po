@@ -1,7 +1,7 @@
 # A small Polish fixture to exercise gettext's three plural forms.
 msgid ""
 msgstr ""
-"Project-Id-Version: Fastpotify tests\n"
+"Project-Id-Version: Spotifast tests\n"
 "Language: pl\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Plural-Forms: nplurals=3; plural=(n == 1 ? 0 : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 1 : 2);\n"

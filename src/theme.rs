@@ -4,9 +4,13 @@
 //! All colors use [`Palette`] so light, dark, and album-art-tinted themes stay
 //! consistent.
 
+pub mod custom;
+#[cfg(target_os = "linux")]
+mod omarchy;
+
 use egui::{Color32, CornerRadius, Response, Sense, Stroke, Vec2};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Palette {
     pub dark: bool,
     pub window: Color32,
@@ -323,6 +327,10 @@ fn install_fonts(ctx: &egui::Context) {
         // epaint rebuilds the glyph atlas.
         let mut data = FontData::from_static(&font.bytes);
         data.index = font.index;
+        let offset = fallback_baseline_y_offset(&font.bytes, font.index);
+        if offset.abs() > 0.001 {
+            data.tweak.y_offset_factor = offset;
+        }
         fonts.font_data.insert(font.name.clone(), Arc::new(data));
         for family in fonts.families.values_mut() {
             family.push(font.name.clone());
@@ -330,6 +338,53 @@ fn install_fonts(ctx: &egui::Context) {
     }
 
     ctx.set_fonts(fonts);
+}
+
+// Adjusts a fallback face's baseline to align with Inter.
+//
+// epaint positions fallback glyphs by centering the difference between the
+// primary font's row height and the fallback font's row height:
+//
+//     glyph.pos.y = fallback.ascent + 0.5 * (primary.row_height - fallback.row_height)
+//
+// When the fallback face has vertical metrics different from Inter (for example,
+// Hiragino Sans on macOS, which declares a line height of 1.5 em via a 0.5 em lineGap),
+// this centering shifts the fallback baseline upward or downward relative to Latin text.
+//
+// Offsetting the glyph downward by the difference in baseline-to-center distances:
+//
+//     (inter.ascent - 0.5 * inter.row_height) - (fallback.ascent - 0.5 * fallback.row_height)
+//
+// neutralises epaint's centering and aligns the baselines across all mixed scripts
+// and font sizes.
+fn fallback_baseline_y_offset(bytes: &[u8], index: u32) -> f32 {
+    use skrifa::MetadataProvider as _;
+
+    let Ok(font) = skrifa::FontRef::from_index(bytes, index) else {
+        return 0.0;
+    };
+    let metrics = font.metrics(
+        skrifa::instance::Size::unscaled(),
+        skrifa::instance::LocationRef::default(),
+    );
+    let upm = metrics.units_per_em as f32;
+    if upm <= 0.0 {
+        return 0.0;
+    }
+    let fallback_height = metrics.ascent - metrics.descent + metrics.leading;
+    if fallback_height <= 0.0 {
+        return 0.0;
+    }
+
+    // Inter's metrics from assets/fonts/InterVariable.ttf:
+    // units_per_em = 2048, typo_asc = 1984, typo_desc = -494, typo_line_gap = 0
+    // ascent_ratio = 1984 / 2048 = 0.96875
+    // row_height_ratio = (1984 - (-494)) / 2048 = 2478 / 2048 = 1.2099609375
+    // baseline_center = 0.96875 - 0.5 * 1.2099609375 = 0.36376953125
+    const INTER_BASELINE_CENTER: f32 = (1984.0 / 2048.0) - 0.5 * ((1984.0 + 494.0) / 2048.0);
+
+    let fallback_baseline_center = (metrics.ascent - 0.5 * fallback_height) / upm;
+    INTER_BASELINE_CENTER - fallback_baseline_center
 }
 
 macro_rules! icons {
@@ -610,7 +665,7 @@ pub fn icon_button(
 /// Horizontal offset that optically centers play triangles.
 ///
 /// Lucide includes a 1/24-width shift; a measured 3% shift centers the icon at
-/// Fastpotify's sizes. Use this everywhere instead of per-call adjustments.
+/// Spotifast's sizes. Use this everywhere instead of per-call adjustments.
 pub fn play_glyph_offset(icon: Icon, icon_size: f32) -> Vec2 {
     if matches!(icon, Icon::PlayFilled | Icon::Play) {
         Vec2::new(icon_size * (0.03 - 1.0 / 24.0), 0.0)
@@ -904,5 +959,139 @@ mod tests {
             assert!(galley.rows[0].glyphs.len() >= 5);
         });
         output.textures_delta.clear();
+    }
+
+    #[test]
+    fn fallback_baseline_offset_is_zero_for_inter() {
+        let inter = include_bytes!("../assets/fonts/InterVariable.ttf");
+        let offset = fallback_baseline_y_offset(inter, 0);
+        assert!(
+            offset.abs() < 1e-4,
+            "Inter should have zero offset relative to itself, got {offset}"
+        );
+    }
+
+    #[test]
+    fn fallback_baseline_offset_is_bounded_for_installed_fonts() {
+        for font in crate::system_fonts::fallbacks() {
+            let offset = fallback_baseline_y_offset(&font.bytes, font.index);
+            assert!(
+                offset.is_finite(),
+                "{} offset was not finite: {offset}",
+                font.name
+            );
+            assert!(
+                (-1.0..=1.0).contains(&offset),
+                "{} offset was out of expected range: {offset}",
+                font.name
+            );
+        }
+    }
+
+    #[test]
+    fn fonts_install_and_layout_mixed_cjk() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let galley = ui.painter().layout_no_wrap(
+                "Track 87: 恋におちて -Fall in love- (Live)".to_string(),
+                regular(14.0),
+                Color32::WHITE,
+            );
+            assert!(!galley.rows.is_empty());
+            assert!(galley.rows[0].glyphs.len() >= 10);
+        });
+        output.textures_delta.clear();
+    }
+
+    /// Compare the painted glyph positions, including the raster offset, with
+    /// the same glyph drawn by its untweaked face. Inspecting `glyph.pos` alone
+    /// misses FontTweak, which is applied to the glyph's texture offset.
+    #[test]
+    fn fallback_glyphs_are_painted_on_the_latin_baseline() {
+        use egui::{FontFamily, FontId};
+        use skrifa::MetadataProvider as _;
+        use std::sync::Arc;
+
+        for pixels_per_point in [1.0, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            ctx.set_pixels_per_point(pixels_per_point);
+            install(&ctx);
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .textures_delta
+                .clear();
+            let mut fonts = ctx.fonts(|fonts| fonts.definitions().clone());
+            let inter_data = Arc::clone(&fonts.font_data["inter"]);
+            let inter = skrifa::FontRef::from_index(&inter_data.font, 0).expect("bundled Inter");
+            let inter_map = inter.charmap();
+            let mut cases = Vec::new();
+            for font in crate::system_fonts::fallbacks() {
+                let face = skrifa::FontRef::from_index(&font.bytes, font.index)
+                    .expect("readable system fallback");
+                let Some(character) = crate::system_fonts::FALLBACK_SCRIPTS
+                    .iter()
+                    .map(|(_, probe, _)| *probe)
+                    .find(|probe| {
+                        inter_map.map(*probe).is_none() && face.charmap().map(*probe).is_some()
+                    })
+                else {
+                    continue;
+                };
+                let reference = format!("raw-{}", font.name);
+                let mut raw = (*fonts.font_data[&font.name]).clone();
+                raw.tweak.y_offset_factor = 0.0;
+                raw.tweak.y_offset = 0.0;
+                fonts.font_data.insert(reference.clone(), Arc::new(raw));
+                fonts.families.insert(
+                    FontFamily::Name(reference.clone().into()),
+                    vec![reference.clone()],
+                );
+                // Use the application's actual installed faces, selecting this
+                // fallback explicitly so an earlier face cannot mask a failure.
+                for primary in ["inter", INTER_MEDIUM, INTER_SEMIBOLD, INTER_BOLD] {
+                    let mixed = format!("{primary}-{}", font.name);
+                    fonts.families.insert(
+                        FontFamily::Name(mixed.clone().into()),
+                        vec![primary.into(), font.name.clone()],
+                    );
+                    cases.push((character, reference.clone(), mixed));
+                }
+            }
+            ctx.set_fonts(fonts);
+            ctx.run_ui(egui::RawInput::default(), |_| {})
+                .textures_delta
+                .clear();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                for (character, reference, mixed) in &cases {
+                    for size in [14.0, 28.0] {
+                        let layout = |text, family: &String| {
+                            ui.painter().layout_no_wrap(
+                                text,
+                                FontId::new(size, FontFamily::Name(family.clone().into())),
+                                Color32::WHITE,
+                            )
+                        };
+                        let raw = layout(character.to_string(), reference);
+                        let galley = layout(format!("A{character}A"), mixed);
+                        let row = &galley.rows[0];
+                        let glyph = row.glyphs.iter().find(|g| g.chr == *character).unwrap();
+                        let raw_row = &raw.rows[0];
+                        let raw_glyph = &raw_row.glyphs[0];
+                        let top = row.visuals.mesh.vertices[glyph.first_vertex as usize].pos.y;
+                        let raw_top =
+                            raw_row.visuals.mesh.vertices[raw_glyph.first_vertex as usize].pos.y;
+                        let baseline = top - raw_top + raw_glyph.pos.y;
+                        let latin_baseline = row.glyphs[0].pos.y;
+                        // Glyphs and their offsets snap independently to pixels.
+                        let error_pixels = (baseline - latin_baseline).abs() * pixels_per_point;
+                        assert!(
+                            error_pixels <= 1.01,
+                            "{mixed}, {character}, {size} pt at {pixels_per_point}x: baseline {baseline}, Latin {latin_baseline} ({error_pixels} px apart)"
+                        );
+                    }
+                }
+            });
+            output.textures_delta.clear();
+        }
     }
 }

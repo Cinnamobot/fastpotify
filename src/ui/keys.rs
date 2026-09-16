@@ -16,6 +16,9 @@ pub(super) const MILKDROP_SHORTCUT: &str = platform_shortcut("Ctrl+Shift+K", "Cm
 
 pub fn handle(app: &mut App, ctx: &egui::Context) {
     let typing = ctx.memory(|memory| memory.focused().is_some());
+    // A focused song row still takes Ctrl+arrow to change songs; a text
+    // field uses those keys to move its caret.
+    let editing_text = ctx.text_edit_focused();
     let mut actions = Vec::new();
     ctx.input_mut(|input| {
         let mut key = |modifiers: Modifiers, key: Key, action: Action| {
@@ -23,6 +26,29 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
                 actions.push(action);
             }
         };
+        // egui ignores an extra Shift when it matches, so a Shift shortcut
+        // is looked for before the plain one it extends: Ctrl+B would
+        // otherwise take Ctrl+Shift+B, and Ctrl+Q Ctrl+Shift+Q.
+        key(
+            Modifiers::COMMAND | Modifiers::SHIFT,
+            Key::A,
+            Action::OpenUri("artist".into()),
+        );
+        key(
+            Modifiers::COMMAND | Modifiers::SHIFT,
+            Key::B,
+            Action::OpenUri("album".into()),
+        );
+        // Cmd+Shift+Q is Log Out, taken by the window server.
+        if cfg!(target_os = "macos") {
+            key(Modifiers::COMMAND, Key::U, Action::ToggleQueuePanel);
+        } else {
+            key(
+                Modifiers::COMMAND | Modifiers::SHIFT,
+                Key::Q,
+                Action::ToggleQueuePanel,
+            );
+        }
         key(Modifiers::COMMAND, Key::F, Action::FocusSearch);
         key(Modifiers::COMMAND, Key::B, Action::ToggleSidebar);
         key(Modifiers::COMMAND, Key::Comma, Action::Open(Page::Settings));
@@ -64,31 +90,16 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
             Key::Slash,
             Action::ShowDialog(Dialog::Shortcuts),
         );
-        key(Modifiers::ALT, Key::ArrowLeft, Action::Back);
-        key(Modifiers::ALT, Key::ArrowRight, Action::Forward);
-        key(Modifiers::COMMAND, Key::ArrowLeft, Action::Previous);
-        key(Modifiers::COMMAND, Key::ArrowRight, Action::Next);
-        key(Modifiers::COMMAND, Key::ArrowUp, Action::VolumeBy(5));
-        key(Modifiers::COMMAND, Key::ArrowDown, Action::VolumeBy(-5));
-        key(
-            Modifiers::COMMAND | Modifiers::SHIFT,
-            Key::A,
-            Action::OpenUri("artist".into()),
-        );
-        key(
-            Modifiers::COMMAND | Modifiers::SHIFT,
-            Key::B,
-            Action::OpenUri("album".into()),
-        );
-        // Cmd+Shift+Q is Log Out, taken by the window server.
-        if cfg!(target_os = "macos") {
-            key(Modifiers::COMMAND, Key::U, Action::ToggleQueuePanel);
-        } else {
-            key(
-                Modifiers::COMMAND | Modifiers::SHIFT,
-                Key::Q,
-                Action::ToggleQueuePanel,
-            );
+        // In a text field these keys move the caret: Ctrl or Alt by a word,
+        // Cmd to the end of the line, Up and Down to the end of the text.
+        // Taking them here skipped songs while a search was being typed.
+        if !editing_text {
+            key(Modifiers::ALT, Key::ArrowLeft, Action::Back);
+            key(Modifiers::ALT, Key::ArrowRight, Action::Forward);
+            key(Modifiers::COMMAND, Key::ArrowLeft, Action::Previous);
+            key(Modifiers::COMMAND, Key::ArrowRight, Action::Next);
+            key(Modifiers::COMMAND, Key::ArrowUp, Action::VolumeBy(5));
+            key(Modifiers::COMMAND, Key::ArrowDown, Action::VolumeBy(-5));
         }
         if !typing {
             key(
@@ -216,6 +227,144 @@ mod tests {
     use crate::paths::AppDirs;
     use crate::settings::Settings;
 
+    /// A text field edits with the arrow keys: Ctrl or Alt moves a word,
+    /// Cmd moves to the end of the line, and Ctrl or Cmd with Up or Down
+    /// to either end of the text. While a field has focus those keys are
+    /// the field's, and the shortcuts on them wait until it lets go.
+    #[test]
+    fn a_focused_text_field_keeps_the_arrow_keys_it_edits_with() {
+        let root = std::env::temp_dir().join(format!(
+            "fastpotify-text-arrows-test-{}",
+            std::process::id()
+        ));
+        let dirs = AppDirs {
+            config: root.join("config"),
+            state: root.join("state"),
+            cache: root.join("cache"),
+        };
+        let mut app = App::new(
+            &crate::backend::Waker::default(),
+            dirs,
+            Settings::default(),
+            AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+            },
+        );
+        crate::demo::populate(&mut app);
+
+        // The modifiers as the platform reports its command key.
+        let command = if cfg!(target_os = "macos") {
+            Modifiers::MAC_CMD | Modifiers::COMMAND
+        } else {
+            Modifiers::CTRL | Modifiers::COMMAND
+        };
+        let ctx = egui::Context::default();
+        let field = egui::Id::new("keys-test-field");
+        let row = egui::Id::new("keys-test-row");
+        let mut text = String::from("find this song");
+        let end = text.chars().count();
+        // Shortcuts first, then the page, as `ui::show` draws a frame.
+        let frame = |app: &mut App, text: &mut String, events: Vec<egui::Event>| {
+            app.actions.clear();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    handle(app, ui.ctx());
+                    ui.add(egui::TextEdit::singleline(text).id(field));
+                    ui.interact(
+                        egui::Rect::from_min_size(egui::pos2(0.0, 100.0), egui::vec2(200.0, 28.0)),
+                        row,
+                        egui::Sense::click(),
+                    );
+                },
+            );
+            output.textures_delta.clear();
+            format!("{:?}", app.actions)
+        };
+        let press = |key: Key, modifiers: Modifiers| {
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }]
+        };
+        let caret_at = |index: usize| {
+            let mut state = egui::TextEdit::load_state(&ctx, field).expect("the field's state");
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(
+                    egui::text::CCursor::new(index),
+                )));
+            state.store(&ctx, field);
+        };
+        let caret = || {
+            egui::TextEdit::load_state(&ctx, field)
+                .and_then(|state| state.cursor.char_range())
+                .map(|range| range.primary.index)
+        };
+
+        frame(&mut app, &mut text, vec![]);
+        ctx.memory_mut(|memory| memory.request_focus(field));
+        frame(&mut app, &mut text, vec![]);
+        assert!(ctx.memory(|memory| memory.has_focus(field)));
+
+        // Cmd+Left goes to the start of the line; Ctrl+Left back a word.
+        let command_left = if cfg!(target_os = "macos") { 0 } else { 10 };
+        for (keys, modifiers, lands, what) in [
+            (
+                Key::ArrowLeft,
+                command,
+                command_left,
+                "the previous-song shortcut",
+            ),
+            (Key::ArrowLeft, Modifiers::ALT, 10, "the back shortcut"),
+            (Key::ArrowUp, command, 0, "the volume shortcut"),
+        ] {
+            caret_at(end);
+            assert_eq!(
+                frame(&mut app, &mut text, press(keys, modifiers)),
+                "[]",
+                "{what} took {keys:?} from the focused field"
+            );
+            assert_eq!(
+                caret(),
+                Some(egui::text::CCursor::new(lands).index),
+                "{keys:?} with {modifiers:?} moves the caret"
+            );
+        }
+        assert_eq!(text, "find this song");
+
+        // With nothing being typed into, the shortcuts are the app's again.
+        ctx.memory_mut(|memory| memory.surrender_focus(field));
+        frame(&mut app, &mut text, vec![]);
+        assert_eq!(
+            frame(&mut app, &mut text, press(Key::ArrowRight, command)),
+            format!("{:?}", [Action::Next])
+        );
+        assert_eq!(
+            frame(&mut app, &mut text, press(Key::ArrowLeft, Modifiers::ALT)),
+            format!("{:?}", [Action::Back])
+        );
+        // A focused non-text row still receives player/navigation shortcuts.
+        ctx.memory_mut(|memory| memory.request_focus(row));
+        frame(&mut app, &mut text, vec![]);
+        assert!(ctx.memory(|memory| memory.has_focus(row)));
+        assert!(!ctx.text_edit_focused());
+        assert_eq!(
+            frame(&mut app, &mut text, press(Key::ArrowRight, command)),
+            format!("{:?}", [Action::Next])
+        );
+        app.backend.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn shortcut_constants_name_the_platform_modifier() {
         let expected = if cfg!(target_os = "macos") {
@@ -305,6 +454,86 @@ mod tests {
             app.actions.as_slice(),
             [Action::ToggleSaved(uri)] if uri == "spotify:track:trk0"
         ));
+        app.backend.shutdown();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// egui ignores an extra Shift when it matches a shortcut, so the
+    /// plain Ctrl+Q would also take Ctrl+Shift+Q if it were looked for
+    /// first.
+    #[test]
+    fn a_shift_shortcut_is_not_taken_by_the_plain_one_it_extends() {
+        let root = std::env::temp_dir().join(format!(
+            "fastpotify-shift-shortcut-test-{}",
+            std::process::id()
+        ));
+        let dirs = AppDirs {
+            config: root.join("config"),
+            state: root.join("state"),
+            cache: root.join("cache"),
+        };
+        let mut app = App::new(
+            &crate::backend::Waker::default(),
+            dirs,
+            Settings::default(),
+            AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+            },
+        );
+        crate::demo::populate(&mut app);
+        let album = app.now_playing().and_then(|now| now.album_id);
+        assert!(album.is_some(), "the demo song has an album to go to");
+
+        // The modifiers as the platform reports its command key.
+        let command = if cfg!(target_os = "macos") {
+            Modifiers::MAC_CMD | Modifiers::COMMAND
+        } else {
+            Modifiers::CTRL | Modifiers::COMMAND
+        };
+        let ctx = egui::Context::default();
+        let press = |app: &mut App, key: Key, modifiers: Modifiers| {
+            app.actions.clear();
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                }],
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| handle(app, ui.ctx()));
+            output.textures_delta.clear();
+            format!("{:?}", app.actions)
+        };
+
+        let shift = command | Modifiers::SHIFT;
+        // macOS shows the queue on Cmd+U; Cmd+Shift+Q is Log Out.
+        if !cfg!(target_os = "macos") {
+            assert_eq!(
+                press(&mut app, Key::Q, shift),
+                format!("{:?}", [Action::ToggleQueuePanel]),
+                "the queue shortcut shows the queue"
+            );
+        }
+        assert_eq!(
+            press(&mut app, Key::Q, command),
+            format!("{:?}", [Action::Quit]),
+            "the quit shortcut still quits"
+        );
+        assert_eq!(
+            press(&mut app, Key::B, shift),
+            format!("{:?}", [Action::Open(Page::Album(album.unwrap()))]),
+            "the album shortcut goes to the album"
+        );
+        assert_eq!(
+            press(&mut app, Key::B, command),
+            format!("{:?}", [Action::ToggleSidebar]),
+            "the sidebar shortcut still toggles the sidebar"
+        );
         app.backend.shutdown();
         let _ = std::fs::remove_dir_all(root);
     }

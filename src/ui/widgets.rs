@@ -267,6 +267,9 @@ pub fn menu_item_enabled(
         egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled && ui.is_enabled(), label)
     });
     theme::focus_ring(ui, &response);
+    if enabled {
+        crate::autoscroll::row(ui, &response);
+    }
     let clicked = enabled && response.clicked();
     if clicked {
         ui.close();
@@ -275,6 +278,104 @@ pub fn menu_item_enabled(
         response.on_hover_cursor(egui::CursorIcon::PointingHand);
     }
     clicked
+}
+
+/// One entry in a popup menu that opens a child submenu.
+pub fn menu_submenu<R>(
+    ui: &mut Ui,
+    palette: &Palette,
+    icon: Option<Icon>,
+    label: &str,
+    add_contents: impl FnOnce(&mut Ui) -> R,
+) -> Option<egui::InnerResponse<R>> {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, 28.0), Sense::click());
+    let is_in_menu = egui::menu::is_in_menu(ui);
+    let submenu_id = egui::menu::SubMenu::id_from_widget_id(response.id);
+    let is_open = if is_in_menu {
+        egui::menu::MenuState::from_ui(ui, |state, _| state.open_item == Some(submenu_id))
+    } else {
+        egui::Popup::menu(&response).is_open()
+    };
+
+    if ui.is_rect_visible(rect) {
+        if response.hovered() || is_open {
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(6), palette.surface_hover);
+        }
+        let color = palette.text;
+        let mut x = rect.left() + 10.0;
+        if let Some(icon) = icon {
+            let icon_rect =
+                Rect::from_center_size(pos2(x + 8.0, rect.center().y), Vec2::splat(16.0));
+            icon.image(palette.secondary, 16.0).paint_at(ui, icon_rect);
+            x += 26.0;
+        }
+
+        let arrow_galley = crate::bidi::layout(
+            ui.painter(),
+            egui::menu::SubMenuButton::RIGHT_ARROW,
+            theme::regular(11.0),
+            palette.secondary,
+            16.0,
+            1,
+            None,
+        );
+        let arrow_width = arrow_galley.size().x;
+        let arrow_rect = Rect::from_min_max(
+            pos2(
+                rect.right() - 10.0 - arrow_width,
+                rect.center().y - arrow_galley.size().y / 2.0,
+            ),
+            pos2(
+                rect.right() - 10.0,
+                rect.center().y + arrow_galley.size().y / 2.0,
+            ),
+        );
+        ui.painter().galley(
+            crate::bidi::galley_pos(arrow_rect, &arrow_galley),
+            arrow_galley,
+            palette.secondary,
+        );
+
+        let max_text_width = (rect.right() - 10.0 - arrow_width - 6.0 - x).max(0.0);
+        let galley = crate::bidi::layout(
+            ui.painter(),
+            label,
+            theme::regular(13.5),
+            color,
+            max_text_width,
+            1,
+            Some(crate::bidi::ELLIPSIS),
+        );
+        let text_rect = Rect::from_min_max(
+            pos2(x, rect.center().y - galley.size().y / 2.0),
+            pos2(
+                rect.right() - 10.0 - arrow_width - 6.0,
+                rect.center().y + galley.size().y / 2.0,
+            ),
+        );
+        ui.painter()
+            .galley(crate::bidi::galley_pos(text_rect, &galley), galley, color);
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), label)
+    });
+    theme::focus_ring(ui, &response);
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    if is_in_menu {
+        egui::menu::SubMenu::new().show(ui, &response, add_contents)
+    } else {
+        let config = egui::menu::MenuConfig::find(ui);
+        egui::Popup::menu(&response)
+            .close_behavior(config.close_behavior)
+            .style(config.style.clone())
+            .info(
+                egui::UiStackInfo::new(egui::UiKind::Menu)
+                    .with_tag_value(egui::menu::MenuConfig::MENU_CONFIG_TAG, config),
+            )
+            .show(add_contents)
+    }
 }
 
 pub fn menu_separator(ui: &mut Ui, palette: &Palette) {
@@ -347,20 +448,27 @@ pub fn picked_menu(ui: &mut Ui, app: &mut App, songs: &[PlayableItem]) {
 
 fn add_to_playlist_menu(ui: &mut Ui, app: &mut App, items: &[PlayableItem]) {
     let query_id = ui.make_persistent_id("add-to-playlist-query");
-    let opened = ui.menu_button("Add to playlist", |ui| {
-        let frame = ui.ctx().cumulative_frame_nr();
-        let previous = ui
-            .data(|data| data.get_temp::<(u64, String)>(query_id))
-            .filter(|(last_frame, _)| frame.saturating_sub(*last_frame) <= 1);
-        let fresh = previous.is_none();
-        let mut query = previous.map(|(_, query)| query).unwrap_or_default();
-        let field = playlist_picker(ui, app, items, &mut query);
-        if fresh {
-            field.request_focus();
-        }
-        ui.data_mut(|data| data.insert_temp(query_id, (frame, query)));
-    });
-    if opened.inner.is_none() {
+    let palette = app.palette;
+    let opened = menu_submenu(
+        ui,
+        &palette,
+        Some(Icon::ListPlus),
+        "Add to playlist",
+        |ui| {
+            let frame = ui.ctx().cumulative_frame_nr();
+            let previous = ui
+                .data(|data| data.get_temp::<(u64, String)>(query_id))
+                .filter(|(last_frame, _)| frame.saturating_sub(*last_frame) <= 1);
+            let fresh = previous.is_none();
+            let mut query = previous.map(|(_, query)| query).unwrap_or_default();
+            let field = playlist_picker(ui, app, items, &mut query);
+            if fresh {
+                field.request_focus();
+            }
+            ui.data_mut(|data| data.insert_temp(query_id, (frame, query)));
+        },
+    );
+    if opened.is_none() {
         ui.data_mut(|data| data.remove::<(u64, String)>(query_id));
     }
 }
@@ -411,10 +519,13 @@ pub(crate) fn playlist_picker(
             },
         );
     }
-    egui::ScrollArea::vertical()
-        .id_salt("filtered-playlists")
-        .max_height(320.0)
-        .show(ui, |ui| {
+    crate::autoscroll::show(
+        ui,
+        egui::ScrollArea::vertical()
+            .id_salt("filtered-playlists")
+            .max_height(320.0),
+        egui::Vec2b::new(false, true),
+        |ui| {
             for (id, name) in matches {
                 ui.push_id(id, |ui| {
                     if menu_item(ui, &palette, Some(Icon::ListMusic), name) {
@@ -426,7 +537,8 @@ pub(crate) fn playlist_picker(
                     }
                 });
             }
-        });
+        },
+    );
     field
 }
 
@@ -508,7 +620,7 @@ pub fn item_menu(
                     )));
                 }
             } else if artists.len() > 1 {
-                ui.menu_button("Go to artist", |ui| {
+                menu_submenu(ui, &palette, Some(Icon::User), "Go to artist", |ui| {
                     ui.set_min_width(200.0);
                     for artist in &artists {
                         if menu_item(ui, &palette, Some(Icon::User), &artist.name) {
@@ -592,7 +704,7 @@ pub fn context_menu_items(
                     .clone()
                     .map(|d| util::strip_html(&d))
                     .unwrap_or_default(),
-                public: playlist.public.unwrap_or(false),
+                public: playlist.public,
             }));
         }
         if menu_item(ui, &palette, Some(Icon::Trash), "Delete") {
@@ -611,6 +723,15 @@ pub fn context_menu_items(
     if menu_item(ui, &palette, Some(Icon::ExternalLink), "Open in Spotify") {
         app.actions.push(Action::OpenInSpotify(uri.to_string()));
     }
+}
+
+/// Whether a row can start playback through Spotify. Unknown availability
+/// remains playable, while local files and missing entries cannot be requested.
+pub(crate) fn row_playable(item: &PlayableItem) -> bool {
+    !item.uri().is_empty()
+        && !item.uri().starts_with("spotify:local:")
+        && !matches!(item, PlayableItem::Track(track)
+            if track.is_local || track.is_playable == Some(false))
 }
 
 /// Describes one row of a track table.
@@ -720,6 +841,15 @@ fn columns(width: f32, row: &TrackRow<'_>) -> Columns {
 /// Returns the selection behavior for a row-body click. The caller supplies
 /// the display index because sorting and filtering change row positions.
 pub fn track_row(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<RowPick> {
+    track_row_response(ui, app, row).1
+}
+
+/// Also exposes the row body so a collection can navigate between whole songs.
+pub(crate) fn track_row_response(
+    ui: &mut Ui,
+    app: &mut App,
+    row: TrackRow<'_>,
+) -> (egui::Response, Option<RowPick>) {
     // Virtual lists reuse the visible slots as they scroll. Keep focus and
     // accessibility actions attached to the song and its occurrence instead.
     // Now playing and Next up can both contain the same song at index zero.
@@ -728,7 +858,11 @@ pub fn track_row(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<RowPic
         "track-row",
         std::mem::discriminant(row.context),
         row.item.uri(),
-        row.index,
+        // Playback can omit unavailable rows; the displayed occurrence keeps
+        // a distinct identity even when playback positions are compacted.
+        row.number
+            .map(|number| number.saturating_sub(1))
+            .unwrap_or(row.index),
     ));
     ui.scope_builder(UiBuilder::new().id(id), |ui| {
         track_row_contents(ui, app, row)
@@ -736,7 +870,11 @@ pub fn track_row(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<RowPic
     .inner
 }
 
-fn track_row_contents(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<RowPick> {
+fn track_row_contents(
+    ui: &mut Ui,
+    app: &mut App,
+    row: TrackRow<'_>,
+) -> (egui::Response, Option<RowPick>) {
     let palette = app.palette;
     let row_height = if row.thin {
         theme::THIN_ROW_HEIGHT
@@ -748,10 +886,7 @@ fn track_row_contents(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<R
     let width = ui.available_width();
     let (rect, response) = ui.allocate_exact_size(vec2(width, row_height), Sense::click_and_drag());
     let rect = rect.translate(vec2(0.0, row.shift));
-    let unavailable = match row.item {
-        PlayableItem::Track(track) => track.is_playable == Some(false) || track.is_local,
-        PlayableItem::Episode(_) => false,
-    };
+    let unavailable = !row_playable(row.item);
     response.widget_info(|| {
         egui::WidgetInfo::selected(
             egui::WidgetType::Button,
@@ -764,25 +899,28 @@ fn track_row_contents(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<R
         response.scroll_to_me(None);
     }
     if !ui.is_rect_visible(rect) && !response.has_focus() && !response.clicked() {
-        return None;
+        return (response, None);
     }
     // Start a sidebar drag only after egui's drag threshold.
     if row.item.is_track() && response.drag_started_by(egui::PointerButton::Primary) {
+        let items = dragged_items(row.item, row.picked, row.picked_songs);
         // Keep the source index for moves within an editable playlist.
-        let from = match row.context {
-            RowContext::Context {
-                editable_playlist: Some((id, _)),
-                ..
-            } => Some((id.clone(), row.index as u32)),
-            _ => None,
-        };
+        let from = (items.len() == 1)
+            .then(|| match row.context {
+                RowContext::Context {
+                    editable_playlist: Some((id, _)),
+                    ..
+                } => Some((id.clone(), row.index as u32)),
+                _ => None,
+            })
+            .flatten();
+        let preview = items.first().unwrap_or(row.item);
         egui::DragAndDrop::set_payload(
             ui.ctx(),
             DragTrack {
-                uri: row.item.uri().to_string(),
-                title: row.item.name().to_string(),
-                image: row.item.image(64).map(str::to_string),
-                item: row.item.clone(),
+                title: preview.name().to_string(),
+                image: preview.image(64).map(str::to_string),
+                items,
                 from,
             },
         );
@@ -797,14 +935,13 @@ fn track_row_contents(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<R
     let playing = is_current && app.believed_playing();
     let hovered = ui.rect_contains_pointer(rect) || response.has_focus();
     if row.picked {
-        // Picked rows read as a block, so a run of them looks like one
-        // thing rather than a stack of hovers. Hovering one still lifts
-        // it, so the pointer is never lost inside the block.
+        // Keep the existing translucent selection, using a neutral palette
+        // color so selecting a song does not mark it as playing.
         ui.painter().rect_filled(
             rect,
             CornerRadius::same(6),
             palette
-                .accent
+                .secondary
                 .gamma_multiply(if hovered { 0.30 } else { 0.20 }),
         );
     } else if hovered {
@@ -816,7 +953,8 @@ fn track_row_contents(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<R
                 .gamma_multiply(if palette.dark { 0.7 } else { 1.0 }),
         );
     }
-    theme::focus_ring(ui, &response);
+    // The row highlight also shows keyboard focus. Do not add an outline
+    // when a mouse click gives the row focus for arrow-key navigation.
     let cols = columns(width, &row);
     let painter = ui.painter().clone();
     let mut x = rect.left() + 8.0;
@@ -1289,6 +1427,7 @@ fn track_row_contents(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<R
             }
         } else if !on_control {
             // The body of the row, which plays nothing on a single click.
+            response.request_focus();
             let modifiers = ui.input(|input| input.modifiers);
             pick = Some(if modifiers.shift {
                 RowPick::Range
@@ -1311,7 +1450,8 @@ fn track_row_contents(ui: &mut Ui, app: &mut App, row: TrackRow<'_>) -> Option<R
                 item_menu(ui, app, row.item, Some(row.context), Some(row.index));
             }
         });
-    pick
+    crate::autoscroll::row(ui, &response);
+    (response, pick)
 }
 
 /// Scroll the enclosing list while a held drag approaches its visible edges.
@@ -1345,11 +1485,31 @@ pub(crate) fn scroll_during_drag(ui: &Ui) {
     ui.ctx().request_repaint();
 }
 
+fn dragged_items(
+    item: &PlayableItem,
+    picked: bool,
+    picked_songs: &[PlayableItem],
+) -> Vec<PlayableItem> {
+    if picked && !picked_songs.is_empty() {
+        picked_songs.to_vec()
+    } else {
+        vec![item.clone()]
+    }
+}
+
+fn drag_label(track: &DragTrack) -> String {
+    match track.items.as_slice() {
+        [] => track.title.clone(),
+        [item] => item.name().to_string(),
+        [first, rest @ ..] => format!("{} + {} more", first.name(), rest.len()),
+    }
+}
+
 /// The chip that rides the pointer while a song is being dragged.
 pub fn drag_ghost(ctx: &egui::Context, palette: &Palette) {
     // A song and a sidebar row ride the pointer the same way.
     let chip = egui::DragAndDrop::payload::<DragTrack>(ctx)
-        .map(|track| (track.title.clone(), track.image.clone()))
+        .map(|track| (drag_label(&track), track.image.clone()))
         .or_else(|| {
             egui::DragAndDrop::payload::<DragEntry>(ctx)
                 .map(|entry| (entry.title.clone(), entry.image.clone()))
@@ -1800,6 +1960,7 @@ pub fn card(
             .clicked();
         }
     }
+    crate::autoscroll::row(ui, &response);
     let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     theme::focus_ring(ui, &response);
     CardResponse {
@@ -1820,12 +1981,17 @@ pub fn shelf(
     ui.add_space(8.0);
     theme::section_title(ui, palette, title);
     ui.add_space(4.0);
-    egui::ScrollArea::horizontal().id_salt(id).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = CARD_GAP / 2.0;
-            add_contents(ui);
-        });
-    });
+    crate::autoscroll::show(
+        ui,
+        egui::ScrollArea::horizontal().id_salt(id),
+        egui::Vec2b::new(true, false),
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = CARD_GAP / 2.0;
+                add_contents(ui);
+            });
+        },
+    );
     ui.add_space(12.0);
 }
 
@@ -2733,5 +2899,268 @@ mod tests {
         );
         assert!(!painted.is_empty());
         assert_eq!(painted[0], 0);
+    }
+
+    fn song(uri: &str) -> PlayableItem {
+        PlayableItem::Track(Track {
+            uri: uri.to_string(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn track_row_selection_preserves_transparency_and_focus_without_an_outline() {
+        for mut palette in [Palette::dark(), Palette::light()] {
+            // A vivid custom accent must not tint a selected row either.
+            palette.accent = Color32::from_rgb(255, 0, 90);
+            for (picked, focused) in [(true, false), (true, true), (false, true)] {
+                let mut app = test_app();
+                app.backend.shutdown();
+                app.palette = palette;
+                let ctx = egui::Context::default();
+                theme::install(&ctx);
+                theme::apply(&ctx, &palette);
+                let item = song("spotify:track:selected");
+                let context = RowContext::Queue;
+                let mut rect = Rect::NOTHING;
+                let mut id = egui::Id::NULL;
+                let mut draw = || {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                vec2(760.0, 520.0),
+                            )),
+                            events: vec![egui::Event::PointerGone],
+                            ..Default::default()
+                        },
+                        |ui| {
+                            let (response, _) = track_row_response(
+                                ui,
+                                &mut app,
+                                TrackRow {
+                                    index: 0,
+                                    number: Some(1),
+                                    item: &item,
+                                    context: &context,
+                                    show_cover: false,
+                                    show_album: false,
+                                    added_at: None,
+                                    added_by: None,
+                                    show_added_by: false,
+                                    compact: false,
+                                    thin: false,
+                                    shift: 0.0,
+                                    picked,
+                                    picked_songs: &[],
+                                },
+                            );
+                            rect = response.rect;
+                            id = response.id;
+                            if focused {
+                                response.request_focus();
+                            }
+                        },
+                    );
+                    output.textures_delta.clear();
+                    output
+                };
+                draw();
+                let output = draw();
+                let fills: Vec<_> = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::epaint::Shape::Rect(shape) if shape.rect == rect => Some(shape.fill),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(
+                    fills,
+                    [if picked {
+                        palette
+                            .secondary
+                            .gamma_multiply(if focused { 0.30 } else { 0.20 })
+                    } else {
+                        palette
+                            .surface_hover
+                            .gamma_multiply(if palette.dark { 0.7 } else { 1.0 })
+                    }]
+                );
+                if focused {
+                    assert!(ctx.memory(|memory| memory.has_focus(id)));
+                }
+                assert!(
+                    output.shapes.iter().all(|shape| match &shape.shape {
+                        egui::epaint::Shape::Rect(shape)
+                            if shape.rect == rect || shape.rect == rect.expand(2.0) =>
+                        {
+                            shape.stroke == Stroke::NONE
+                                && (shape.rect != rect
+                                    || shape.corner_radius == CornerRadius::same(6))
+                        }
+                        _ => true,
+                    }),
+                    "row selection and focus must not add a border or change the row shape"
+                );
+                assert_eq!(rect.height(), theme::ROW_HEIGHT);
+                assert!(app.actions.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn dragging_a_picked_row_carries_the_whole_selection() {
+        let first = song("spotify:track:first");
+        let second = song("spotify:track:second");
+        let dragged = dragged_items(&second, true, &[first.clone(), second.clone()]);
+        assert_eq!(
+            dragged.iter().map(PlayableItem::uri).collect::<Vec<_>>(),
+            [first.uri(), second.uri()],
+            "the sidebar receives every selected row in table order"
+        );
+    }
+
+    #[test]
+    fn dragging_multiple_songs_labels_the_first_and_the_rest() {
+        let track = DragTrack {
+            title: "Fitraten (VDJ Fly LoFi)".into(),
+            image: None,
+            items: vec![
+                PlayableItem::Track(Track {
+                    name: "Kora Panna".into(),
+                    ..Default::default()
+                }),
+                PlayableItem::Track(Track {
+                    name: "Fitraten (VDJ Fly LoFi)".into(),
+                    ..Default::default()
+                }),
+            ],
+            from: None,
+        };
+        assert_eq!(drag_label(&track), "Kora Panna + 1 more");
+    }
+
+    #[test]
+    fn menu_submenu_registers_focus_and_opens_from_keyboard() {
+        let ctx = egui::Context::default();
+        crate::theme::install(&ctx);
+        let palette = Palette::dark();
+        let mut child_rendered = false;
+        let mut target_id = None;
+
+        // Frame 1: secondary click to open context menu
+        let input1 = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0))),
+            events: vec![egui::Event::PointerButton {
+                pos: pos2(50.0, 50.0),
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut output1 = ctx.run_ui(input1, |ui| {
+            let res = ui.allocate_response(vec2(100.0, 100.0), Sense::click());
+            egui::Popup::menu(&res).open(true).show(|ui| {
+                let prev_id = ui.next_auto_id();
+                target_id = Some(prev_id);
+                menu_submenu(ui, &palette, None, "Submenu", |ui| {
+                    child_rendered = true;
+                    ui.label("Child content");
+                });
+            });
+        });
+        output1.textures_delta.clear();
+
+        let target_id = target_id.expect("context menu must be opened and render submenu button");
+        assert!(!child_rendered, "submenu child must be closed initially");
+
+        // Request keyboard focus onto the submenu button
+        ctx.memory_mut(|mem| mem.request_focus(target_id));
+
+        // Frame 2: trigger activation via Space key
+        let input2 = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0))),
+            events: vec![egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        let mut output2 = ctx.run_ui(input2, |ui| {
+            let res = ui.allocate_response(vec2(100.0, 100.0), Sense::click());
+            egui::Popup::menu(&res).open(true).show(|ui| {
+                menu_submenu(ui, &palette, None, "Submenu", |ui| {
+                    child_rendered = true;
+                    ui.label("Child content");
+                });
+            });
+        });
+        output2.textures_delta.clear();
+
+        assert!(
+            child_rendered,
+            "menu_submenu must open child contents when Space is pressed while focused"
+        );
+
+        // Frame 3: toggle closed with Space, then reopen with Enter
+        let input3 = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0))),
+            events: vec![egui::Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        child_rendered = false;
+        let mut output3 = ctx.run_ui(input3, |ui| {
+            let res = ui.allocate_response(vec2(100.0, 100.0), Sense::click());
+            egui::Popup::menu(&res).open(true).show(|ui| {
+                menu_submenu(ui, &palette, None, "Submenu", |ui| {
+                    child_rendered = true;
+                    ui.label("Child content");
+                });
+            });
+        });
+        output3.textures_delta.clear();
+        assert!(
+            !child_rendered,
+            "menu_submenu must close child contents when Space is pressed again"
+        );
+
+        // Frame 4: reopen with Enter
+        let input4 = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0))),
+            events: vec![egui::Event::Key {
+                key: egui::Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..Default::default()
+        };
+        child_rendered = false;
+        let mut output4 = ctx.run_ui(input4, |ui| {
+            let res = ui.allocate_response(vec2(100.0, 100.0), Sense::click());
+            egui::Popup::menu(&res).open(true).show(|ui| {
+                menu_submenu(ui, &palette, None, "Submenu", |ui| {
+                    child_rendered = true;
+                    ui.label("Child content");
+                });
+            });
+        });
+        output4.textures_delta.clear();
+        assert!(
+            child_rendered,
+            "menu_submenu must open child contents when Enter is pressed while focused"
+        );
     }
 }

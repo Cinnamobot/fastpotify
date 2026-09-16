@@ -27,8 +27,11 @@
   #define InnoArch "x64compatible"
 #endif
 
-#define AppName "Fastpotify"
-#define AppExeName "fastpotify.exe"
+#define AppName "Spotifast"
+#define AppExeName "spotifast.exe"
+; Keep the previous registry identity and installation directory on upgrade.
+#define AppIdentity "Fastpotify"
+#define SpotifastBinary ExtractFileDir(Binary) + "\spotifast.exe"
 
 [Setup]
 ; Never change: this is how Windows tells an update from a new program.
@@ -37,10 +40,10 @@ AppName={#AppName}
 AppVersion={#Version}
 AppVerName={#AppName} {#Version}
 AppPublisher=Carmine Paolino
-AppPublisherURL=https://fastpotify.rocks
-AppSupportURL=https://github.com/crmne/fastpotify/issues
-AppUpdatesURL=https://fastpotify.rocks/download/
-DefaultDirName={localappdata}\Programs\{#AppName}
+AppPublisherURL=https://spotifast.rocks
+AppSupportURL=https://github.com/crmne/spotifast/issues
+AppUpdatesURL=https://spotifast.rocks/download/
+DefaultDirName={localappdata}\Programs\{#AppIdentity}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
@@ -71,6 +74,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 
 [Files]
 Source: "{#Binary}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SpotifastBinary}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "fastpotify-installer.txt"; DestDir: "{app}"; Flags: ignoreversion
@@ -80,10 +84,10 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; Tasks: desktopicon
 
 [Registry]
-; Spotify links (spotify:track:…) open in Fastpotify. Registered for this
+; Spotify links (spotify:track:…) open in Spotifast. Registered for this
 ; user only, like the program itself. The official client registers the same
 ; scheme when it is installed; whichever was set up last has the links, and
-; Settings > Apps > Default apps can hand them to the other, where Fastpotify
+; Settings > Apps > Default apps can hand them to the other, where Spotifast
 ; is listed through the capabilities below.
 Root: HKCU; Subkey: "Software\Classes\spotify"; ValueType: string; ValueName: ""; ValueData: "URL:Spotify link"
 Root: HKCU; Subkey: "Software\Classes\spotify"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
@@ -93,10 +97,10 @@ Root: HKCU; Subkey: "Software\Classes\Fastpotify.spotify"; ValueType: string; Va
 Root: HKCU; Subkey: "Software\Classes\Fastpotify.spotify"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKCU; Subkey: "Software\Classes\Fastpotify.spotify\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"",0"
 Root: HKCU; Subkey: "Software\Classes\Fastpotify.spotify\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}"" ""%1"""
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "A native Spotify client"
-Root: HKCU; Subkey: "Software\{#AppName}\Capabilities\URLAssociations"; ValueType: string; ValueName: "spotify"; ValueData: "Fastpotify.spotify"
-Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#AppName}"; ValueData: "Software\{#AppName}\Capabilities"; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\{#AppIdentity}\Capabilities"; ValueType: string; ValueName: "ApplicationName"; ValueData: "{#AppName}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\{#AppIdentity}\Capabilities"; ValueType: string; ValueName: "ApplicationDescription"; ValueData: "A native Spotify client"
+Root: HKCU; Subkey: "Software\{#AppIdentity}\Capabilities\URLAssociations"; ValueType: string; ValueName: "spotify"; ValueData: "Fastpotify.spotify"
+Root: HKCU; Subkey: "Software\RegisteredApplications"; ValueType: string; ValueName: "{#AppIdentity}"; ValueData: "Software\{#AppIdentity}\Capabilities"; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

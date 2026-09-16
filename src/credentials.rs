@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{auth::StoredToken, paths::AppDirs};
 
+// This is a credential-store identity, not the product display name.
 const SERVICE: &str = "rocks.fastpotify.Fastpotify";
 const TIMEOUT: Duration = Duration::from_secs(20);
 

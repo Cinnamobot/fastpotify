@@ -45,12 +45,12 @@ fn main() -> anyhow::Result<()> {
     let Some(fastpotify::credentials::Grant::Playback(grant)) =
         stored_grant(fastpotify::credentials::Slot::Playback)?
     else {
-        anyhow::bail!("Enable playback in Fastpotify first");
+        anyhow::bail!("Enable playback in Spotifast first");
     };
     let credentials = fastpotify::zeroconf::Credentials::from_playback(&grant)?;
     println!("\nhanding the account to {} ...", receiver.name);
     let info = fastpotify::zeroconf::get_info(&http, receiver)?;
-    match fastpotify::zeroconf::add_user(&http, receiver, &info, &credentials, "Fastpotify") {
+    match fastpotify::zeroconf::add_user(&http, receiver, &info, &credentials, "Spotifast") {
         Ok(()) => println!("  accepted"),
         Err(error) => {
             println!("  refused: {error}");
@@ -78,7 +78,7 @@ fn devices() -> anyhow::Result<Vec<String>> {
     let Some(fastpotify::credentials::Grant::Web(token)) =
         stored_grant(fastpotify::credentials::Slot::Shared)?
     else {
-        anyhow::bail!("Sign in to Fastpotify first");
+        anyhow::bail!("Sign in to Spotifast first");
     };
     let http = reqwest::blocking::Client::new();
     let body: serde_json::Value = http

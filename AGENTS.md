@@ -1,11 +1,11 @@
-# Fastpotify agent guide
+# Spotifast agent guide
 
 Follow `CONTRIBUTING.md`; it is the canonical product and contribution policy.
 These instructions add implementation constraints for coding agents.
 
 ## Product boundaries
 
-- Keep Fastpotify a small native Spotify client. Do not add a browser engine,
+- Keep Spotifast a small native Spotify client. Do not add a browser engine,
   telemetry, a hosted backend, or alternate sources for Spotify audio.
 - Playback capabilities come from librespot. Do not advertise or implement a
   capability merely because its name appears in a protobuf or enum. In
@@ -92,6 +92,15 @@ picture. Zero volume still dances.
   approval of changed appearance or interaction.
 - Inspect before-and-after evidence at representative window sizes and in both
   light and dark themes. If that evidence is missing, request it.
+- Use the HTML comparison format in `CONTRIBUTING.md` under "Visual reviews":
+  matching captures, theme and size selectors, Before/After controls, and
+  relevant interaction states. For a batch, provide one index with PR numbers,
+  a selector, Previous/Next controls and links to individual comparisons.
+- Record approval and requested adjustments by PR number in the triage ledger.
+  Keep visual approval separate from outstanding implementation or test gates.
+  Do not ask again for unchanged approved scope after a rebase. A concrete
+  requested adjustment is authorization to make that adjustment and update its
+  evidence; ask again only for scope beyond the approval or request.
 
 ## Branches
 
@@ -124,19 +133,14 @@ maintainer approval and an exact force-with-lease guard; keep a recovery ref.
 
 A release is not the tag alone. Do these in order:
 
-1. Change the `Cargo.toml` version, add the matching release to the Flatpak
-   metainfo, and update the lockfile with a build.
-   Refresh the `flake.nix` vendor hash when the lockfile changes, even when
-   only the package version changed. Verify `nix build .#default` locally or
-   in CI. Wait for every required CI job on the release commit before tagging.
+1. Change the `Cargo.toml` version and update the lockfile with a build.
+   Wait for every required CI job on the release commit before tagging.
    Commit and push this before the tag so the binaries report the right
    version.
 2. Push the `v*` tag, which triggers the release workflow. Wait for every
    required artifact and `checksums.txt`, then replace the generated notes
    with written ones.
-3. A prerelease stops here. Keep the stable version current on the website,
-   Homebrew, and AUR. The prerelease remains available from GitHub's releases
-   page.
+3. A prerelease stops here.
 4. For a stable release, only after the GitHub release exists, update
    `docs/_config.yml` `fastpotify_version` and
    `docs/_data/versions.yml`. The selector carries only the latest stable
@@ -144,11 +148,6 @@ A release is not the tag alone. Do these in order:
    `/download/`. Do not retain older version entries; they remain available
    through the Changelog link. Never make the download page point at files
    that do not exist yet.
-5. Update the Homebrew cask in the maintainer's tap and the AUR package from
-   the release's `checksums.txt`. The packaging workflow handles configured
-   destinations when `PUBLISH_HOMEBREW` and `PUBLISH_AUR` are enabled. Otherwise
-   use the in-repository packaging CLI to prepare, review and publish them;
-   see `PACKAGING.md`. Native package validation remains required.
 
 Before writing release notes, read the previous two stable releases and match
 their style. Start with a short plain-language summary, use `New` and `Fixed`

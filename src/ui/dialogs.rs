@@ -36,7 +36,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     theme::text(ui, "Spend less time waiting for Spotify", theme::bold(20.0), palette.text);
                     ui.add_space(12.0);
                     for text in [
-                        "Fastpotify's default connection shares Spotify's request limit with other listeners. When it gets busy, loading music and using playback controls can take longer.",
+                        "Spotifast's default connection shares Spotify's request limit with other listeners. When it gets busy, loading music and using playback controls can take longer.",
                         "Your Premium account lets you create a free personal Spotify app. Connect it here to give supported requests your own allowance. Some pages still use the shared connection.",
                         "Setup takes a few minutes. You can also find it later in Settings under Personal Spotify app.",
                     ] {
@@ -158,10 +158,13 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                     // scrolls inside the dialog rather than running off the
                     // bottom with the Done button beyond reach.
                     let room = ui.ctx().content_rect().height() - 190.0;
-                    egui::ScrollArea::vertical()
+                    crate::autoscroll::show(
+                        ui,
+                        egui::ScrollArea::vertical()
                         .max_height(room.max(120.0))
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
+                        .auto_shrink([false, true]),
+                        egui::Vec2b::new(false, true),
+                        |ui| {
                             egui::Grid::new("shortcuts")
                                 .num_columns(2)
                                 .spacing([24.0, 8.0])
@@ -177,7 +180,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                                         ui.end_row();
                                     }
                                 });
-                        });
+                        },
+                    );
                     ui.add_space(16.0);
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if theme::pill_button(ui, &palette, "Done", true).clicked() {
@@ -197,7 +201,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         egui::Label::new(
                             egui::RichText::new(
                                 "Playback needs Spotify Premium. Free accounts can browse \
-                                 and search, but cannot play music through Fastpotify.",
+                                 and search, but cannot play music through Spotifast.",
                             )
                             .font(theme::regular(14.0))
                             .color(palette.secondary),
@@ -371,7 +375,12 @@ fn edit_playlist(app: &mut App, ui: &mut egui::Ui) {
         });
     ui.add_space(10.0);
     ui.horizontal(|ui| {
-        super::widgets::switch(ui, &palette, "Public playlist", public);
+        // Unknown shows as off; only a change of the switch is sent, so
+        // a playlist nothing has described keeps whatever it was.
+        let mut shown = public.unwrap_or(false);
+        if super::widgets::switch(ui, &palette, "Public playlist", &mut shown).changed() {
+            *public = Some(shown);
+        }
         theme::text(ui, "Public playlist", theme::regular(14.0), palette.text);
     });
     ui.add_space(20.0);

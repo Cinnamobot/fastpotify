@@ -41,10 +41,30 @@ impl LibrarySort {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThemeChoice {
-    #[default]
     Dark,
     Light,
+    #[default]
     System,
+}
+
+/// Whether a Home shelf is drawn. Hidden shelves still refresh normally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HomeShelfSettings {
+    pub visible: bool,
+}
+
+impl Default for HomeShelfSettings {
+    fn default() -> Self {
+        Self { visible: true }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HomeSettings {
+    pub made_for_you: HomeShelfSettings,
+    pub recommendations: HomeShelfSettings,
 }
 
 /// Mini-player visualizer mode.
@@ -69,7 +89,7 @@ impl VisMode {
 }
 
 impl ThemeChoice {
-    pub const ALL: [ThemeChoice; 3] = [Self::Dark, Self::Light, Self::System];
+    pub const ALL: [ThemeChoice; 3] = [Self::System, Self::Light, Self::Dark];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -104,6 +124,23 @@ pub struct Settings {
     pub audio_cache: bool,
     pub audio_cache_mb: u64,
     pub theme: ThemeChoice,
+    /// Filename selected from the local themes directory.
+    pub custom_theme: Option<String>,
+    /// Last accepted appearance, retained if its source file becomes unavailable.
+    #[serde(
+        default,
+        deserialize_with = "crate::theme::custom::read_cached_theme",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub custom_theme_cache: Option<crate::theme::custom::CustomTheme>,
+    /// Last detected system palette, so following Omarchy survives a restart.
+    #[serde(
+        default,
+        deserialize_with = "crate::theme::custom::read_cached_theme",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub system_theme_cache: Option<crate::theme::custom::CustomTheme>,
+    pub home: HomeSettings,
     /// Tint the interface with the colour of the playing album's art.
     pub accent_from_art: bool,
     /// Last local volume, 0..=65535.
@@ -124,7 +161,7 @@ pub struct Settings {
     /// An optional personal Spotify Web API application id. The shared
     /// application remains active for coverage when this is present.
     pub web_client_id: Option<String>,
-    /// Legacy reminder time, retained for older Fastpotify versions.
+    /// Legacy reminder time, retained for older Spotifast versions.
     pub personal_app_nudge_at: Option<String>,
     /// The listener has dismissed or followed the personal-app introduction.
     pub personal_app_intro_seen: bool,
@@ -203,7 +240,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            device_name: "Fastpotify".to_string(),
+            device_name: "Spotifast".to_string(),
             bitrate: 320,
             normalisation: false,
             autoplay: true,
@@ -214,7 +251,11 @@ impl Default for Settings {
             audio_buffer_ms: default_buffer_ms(),
             audio_cache: true,
             audio_cache_mb: 1024,
-            theme: ThemeChoice::Dark,
+            theme: ThemeChoice::System,
+            custom_theme: None,
+            custom_theme_cache: None,
+            system_theme_cache: None,
+            home: HomeSettings::default(),
             accent_from_art: true,
             volume: (u16::MAX as u32 * 70 / 100) as u16,
             sidebar_visible: true,
@@ -271,6 +312,17 @@ fn default_buffer_ms() -> u32 {
 }
 
 impl Settings {
+    pub(crate) fn cached_palette(&self) -> Option<crate::theme::Palette> {
+        let theme = if self.custom_theme.is_some() {
+            self.custom_theme_cache.as_ref()
+        } else if self.theme == ThemeChoice::System {
+            self.system_theme_cache.as_ref()
+        } else {
+            None
+        };
+        theme.map(|theme| theme.palette)
+    }
+
     pub fn library_pins(&self) -> Vec<String> {
         let mut pins = self.pinned_contexts.clone();
         if !self.liked_songs_pinned {
@@ -334,6 +386,80 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::Settings;
+
+    #[test]
+    fn new_profiles_follow_the_system_and_saved_choices_are_preserved() {
+        use super::ThemeChoice;
+        assert_eq!(Settings::default().theme, ThemeChoice::System);
+        assert_eq!(ThemeChoice::default(), ThemeChoice::System);
+        let empty: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(empty.theme, ThemeChoice::System);
+        for (json, choice) in [("dark", ThemeChoice::Dark), ("light", ThemeChoice::Light)] {
+            let settings: Settings =
+                serde_json::from_value(serde_json::json!({"theme": json, "volume": 37})).unwrap();
+            assert_eq!(settings.theme, choice);
+            assert_eq!(settings.volume, 37);
+        }
+        let settings: Settings = serde_json::from_value(serde_json::json!({
+            "theme": "dark", "system_theme_cache": {"broken": true}, "volume": 37
+        }))
+        .unwrap();
+        assert!(settings.system_theme_cache.is_none());
+        assert_eq!(settings.theme, ThemeChoice::Dark);
+        assert_eq!(settings.volume, 37);
+    }
+
+    #[test]
+    fn custom_theme_cache_round_trips_and_a_bad_cache_keeps_other_settings() {
+        let mut settings: Settings = serde_json::from_str("{}").unwrap();
+        assert!(settings.custom_theme.is_none() && settings.custom_theme_cache.is_none());
+        settings.custom_theme = Some("gruvbox.json".into());
+        let mut palette = crate::theme::Palette::light();
+        palette.shadow = egui::Color32::from_rgba_unmultiplied(37, 128, 249, 117);
+        settings.custom_theme_cache = Some(crate::theme::custom::CustomTheme {
+            filename: "gruvbox.json".into(),
+            palette,
+        });
+        let encoded = serde_json::to_string(&settings).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Settings>(&encoded).unwrap(),
+            settings
+        );
+        let mut damaged = serde_json::to_value(&settings).unwrap();
+        damaged["custom_theme_cache"] = serde_json::json!({"palette": "broken"});
+        damaged["audio_cache_mb"] = 777.into();
+        let recovered: Settings = serde_json::from_value(damaged).unwrap();
+        assert_eq!(recovered.custom_theme.as_deref(), Some("gruvbox.json"));
+        assert_eq!(recovered.audio_cache_mb, 777);
+        assert!(recovered.custom_theme_cache.is_none());
+    }
+
+    #[test]
+    fn partial_home_preferences_keep_defaults_and_survive_a_settings_round_trip() {
+        for (home, made_for_you, recommendations) in [
+            ("{}", true, true),
+            (r#"{"made_for_you":{"visible":false}}"#, false, true),
+            (r#"{"recommendations":{"visible":false}}"#, true, false),
+            (
+                r#"{"made_for_you":{"visible":false},"recommendations":{"visible":false}}"#,
+                false,
+                false,
+            ),
+        ] {
+            let settings: Settings =
+                serde_json::from_str(&format!(r#"{{"volume":12345,"home":{home}}}"#)).unwrap();
+            assert_eq!(settings.home.made_for_you.visible, made_for_you);
+            assert_eq!(settings.home.recommendations.visible, recommendations);
+            assert_eq!(settings.volume, 12345);
+            let restored: Settings =
+                serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+            assert_eq!(restored, settings);
+        }
+        let old: Settings = serde_json::from_str(r#"{"volume":12345}"#).unwrap();
+        assert!(old.home.made_for_you.visible);
+        assert!(old.home.recommendations.visible);
+        assert_eq!(old.volume, 12345);
+    }
 
     #[test]
     fn older_settings_keep_the_sidebar_visible() {
