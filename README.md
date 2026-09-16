@@ -1,440 +1,278 @@
-# Fastpotify
+# Fastpotify <sub>+ automix</sub>
 
-**Spotify, native and fast.** Fastpotify is a Spotify client written in
-Rust with [egui](https://github.com/emilk/egui). It plays music through
-[librespot](https://github.com/librespot-org/librespot). It typically uses
-100–250 MB of RAM, while Spotify's desktop app often uses 600 MB to over 1 GB.
-It runs on Linux, macOS, and Windows, starts in well under a second, and has no
-browser engine.
+**[Fastpotify](https://github.com/crmne/fastpotify) のフォークです。**
+アプリとしての機能 — Spotify Connect、ライブラリ、検索、プレイリスト編集、
+キュー、Winamp ミニプレイヤー、MilkDrop、イコライザー、MPRIS、設定、
+インストールと配布 — は**すべて本家の成果物**です。
+**それらについては本家の README を読んでください。**
 
-**Playback needs Spotify Premium.** Free accounts can browse and search, but
-cannot play music through Fastpotify on this computer or another device.
+> **→ [crmne/fastpotify の README](https://github.com/crmne/fastpotify#readme)**
+> **→ [fastpotify.rocks](https://fastpotify.rocks/)** (インストール・セットアップ・使い方)
 
-![Fastpotify Home with the playlist library, recommendations, queue, and player visible](docs/screenshot.png)
+このフォークが足すのは **automix** だけです。曲と曲の繋ぎ目を、タイマーではなく
+**音楽に合わせて決める**機能で、本家には存在しません。
 
-See [fastpotify.rocks](https://fastpotify.rocks/) for installation, setup,
-everyday use, and connection details.
+---
 
-## What it does
+## automix とは
 
-- **Plays music on this computer.** Fastpotify appears as a Spotify Connect
-  device. Select it from your phone or play music in the app. Playback is
-  gapless and supports up to 320 kbps, with
-  optional volume normalisation and an on-disk audio cache.
-  Stalled Spotify connections time out after five seconds per attempt so
-  playback can try another endpoint.
-- **Controls other devices.** Move playback to a speaker, a phone, or
-  another computer from the device picker, and keep controlling it: play,
-  pause, skip, seek, shuffle, repeat, volume. Long device lists scroll.
-- **Finds speakers on your network.** Fastpotify finds librespot, spotifyd,
-  and supported hardware receivers over mDNS. Once connected, they appear as
-  Spotify Connect devices. The picker uses responding receivers' names and
-  combines entries with the same device ID.
-- **Library.** Browse playlists, Liked Songs, saved albums, followed artists,
-  podcasts, and saved episodes. Filter, pin, and reorder sidebar items.
-  On `main`, after 0.7.1, double-click a playlist in Library to start playback;
-  a single click opens it.
-  Settings offers a compact track list with one line per song and spaced
-  separators between its name, artists and added date.
-  On `main`, after 0.7.1, choose name, recent plays, or saved-date order where
-  available. Follow Spotify’s playlist order or keep a separate local arrangement.
-  Move Liked Songs among your pins or unpin it and choose its local position;
-  the placement survives restarts.
-  With local playback enabled, releases that the Web API groups as singles
-  are labelled EP when librespot confirms that type.
-  Liked Songs reopens from an account-specific metadata cache. Older rows
-  refresh in the background while Like and Unlike take effect immediately.
-  Right-click album, artist, and podcast cards for their actions (on `main`,
-  after 0.7.1).
-- **Search** across songs, artists, albums, playlists, podcasts, and episodes,
-  with a top result and per-type views. Right-click results and cards for their actions.
-  Text fields offer Cut, Copy, Paste and Select all from their right-click menu.
-  On `main`, after 0.7.1, a personal app searches the catalogue while shared
-  access finds playlists. Each part appears independently, even if the other fails.
+本家の再生はギャップレスです。前の曲が終わった瞬間、次の曲が**その曲の1サンプル目
+から**鳴り始めます。曲が違えばテンポも違うし、次の曲のイントロが前の曲に重なります。
+繋ぎ目は耳につきます。
 
-  On `main`, after 0.7.1, the search field stays clear of the device and update
-  badges in narrow windows; hover their icons to read the labels.
-- **Home** with Made for you, Recently played, your top artists and songs, and
-  recommendations. Right-click playlist shortcuts and shelf cards for their actions.
-- **Artist pages** with popular songs, a filterable discography, and related
-  artists. **Album**, **playlist**, and **podcast** pages support playback
-  from any row.
-  Discography and related-artist cards also have right-click menus (on `main`,
-  after 0.7.1).
-  Artist names in the player bar open their pages, including during local
-  playback before Web API metadata arrives (on `main`, after 0.7.1).
-- **Edit your playlists.** Create, rename, describe, reorder, and delete them.
-  On `main`, after 0.7.1, hold a dragged song near the playlist's top or bottom
-  edge to scroll to rows beyond the screen. The Library sidebar scrolls while
-  dragging toward offscreen playlists too.
-  Add songs from a row menu, or drag a row or the currently playing song to a
-  playlist in the sidebar. On `main`, after 0.7.1, drop a song from the player
-  bar, queue, or another list between rows of an open editable playlist to
-  insert it there. This adds a copy and leaves playback and the queue unchanged.
-  Clear the playlist’s filter and sort to choose an insertion position.
-  Drop it on an empty playlist to add its first song.
-  A playlist a friend shared with you takes songs too,
-  as Spotify's own apps allow. Filter the **Add to playlist** menu by name to
-  find the destination quickly.
-- **Opens Spotify links.** Fastpotify registers for `spotify:` links, so a
-  song, album, artist, playlist, or podcast shared from another app opens
-  in it, whether it is running or not. `open.spotify.com` addresses go
-  through the browser, which hands them to the same handler.
-- **Queue** as a side panel or a page; it names what is playing from, and
-  anything can be added to it from a row menu. **Add to queue** places songs
-  after those already queued and before the context continues.
-- On `main`, after 0.7.1, a playlist's **Play** button explicitly starts at
-  its first available song when Shuffle is off and the original order is
-  selected. Double-click a row to start there; use the player bar to resume.
-- **Resumes the last session.** On startup, the last song is paused where it
-  stopped. Play resumes it, and the other playback controls work before it
-  starts.
-- **Album-art colour.** Pages and the player bar take a tint from the cover
-  of what you are looking at or listening to. Turn it off in Settings.
-- **Light and dark**, or follow the system.
-- **Winamp mini player.** `Ctrl+M` opens a small player for classic `.wsz`
-  skins, drawn at 1x to 4x scale. It includes a spectrum analyser, playlist,
-  and equalizer. It keeps its shade mode and, where the desktop permits,
-  its own position when switching views. Drop a skin from the
-  [Winamp Skin Museum](https://skins.webamp.org) on either window to add it.
-  On Windows, after 0.7.1, a mini player saved on a disconnected monitor
-  starts at a default position on the current desktop.
-  Clicking or double-clicking the Windows tray icon brings the window forward;
-  the tray menu still offers Show or hide.
-  On Windows, after 0.7.1, hide its taskbar button from Settings or the mini
-  player's options menu while keeping the window and tray controls available.
-  On Wayland, use the desktop's Keep Above shortcut or rule; the app's
-  Always on top controls are unavailable there.
+automix は繋ぎ目ごとに4つを決めます。
 
-  ![The mini player wearing the built-in skin](docs/assets/images/winamp.png)
-- **Equalizer.** Winamp's ten bands and presets over the music played on
-  this computer, in Settings and in the skin.
-- **MilkDrop.** The visualiser, powered by
-  [projectM](https://github.com/projectM-visualizer/projectm), runs in its own
-  window and process. It supports fullscreen and automatically downloads more
-  than 10,000 `.milk` presets on first use (about 26 MB).
+| # | 問い | 答え |
+|---|---|---|
+| 1 | 前の曲は**どこで抜ける**? | コーラスの終わり、まだ音楽がある場所 |
+| 2 | 次の曲は**どこから入る**? | 1サンプル目ではなく、**曲自身の始まり** |
+| 3 | 重なりは**どれくらい**? | その曲のテンポでの**整数小節** |
+| 4 | **テンポは合う**? | 合わなければ両方を共通テンポに寄せる |
 
-  https://github.com/user-attachments/assets/12b31312-0e0c-4b34-9383-e8c66aabc58d
-- **Keyboard-first.** Every common action has a shortcut (`Ctrl+/` or `?` lists
-  them).
-- **Keeps playing when you close the window.** Fastpotify stays in the system
-  tray. Use the tray icon or media controls to reopen it, and quit from the
-  tray menu or with `Ctrl+Q`. You can make the close button quit in Settings.
-  On macOS, the Dock icon also reopens the window.
-- **Visible network activity.** Pages show a spinner while loading. The top
-  bar also shows slow or rate-limited Spotify requests.
-- **One instance.** Launching it again brings the existing window forward
-  instead of starting a second copy, on every platform.
-- **Desktop integration.** MPRIS on Linux, so media keys, the shell, and
-  `playerctl` see Fastpotify like any other player. On macOS and Windows,
-  `fastpotify next` and its siblings drive the running app from a terminal,
-  a launcher, or a hotkey. On Windows, after 0.7.1, hover the taskbar button
-  for Previous, Play/Pause, and Next under the window preview.
+**Settings → Playback on this computer → Crossfade** で 1〜12 秒に設定すると有効に
+なります(0 = オフ、既定)。スライダーは重なりの**上限**で、実際の長さは曲に合わせて
+短くなり、計画できないときは通常のクロスフェードに落ちます。
 
-## Install
+---
 
-On Arch Linux, Fastpotify is in the AUR:
+## 目で見る
 
-```bash
-yay -S fastpotify-bin      # the released build, ready made
-yay -S fastpotify          # the release, built from source
-yay -S fastpotify-git      # built from the latest commit
-```
-
-On macOS, with [Homebrew](https://brew.sh):
-
-```sh
-brew install --cask crmne/tap/fastpotify
-```
-
-On Gentoo, [niko-overlays](https://github.com/NikoMalik/niko-overlays) offers
-an optional **community-maintained** package. Its current `0.7.1` ebuild
-builds post-release snapshot `67b8dfb`, rather than the `v0.7.1` release, and
-omits MilkDrop. Use the released binary or build instructions below if you
-want the standard release and feature set.
-
-To enable the overlay with `eselect-repository`, run as root:
-
-```sh
-emerge --ask app-eselect/eselect-repository
-eselect repository add niko-overlays git https://github.com/NikoMalik/niko-overlays.git
-emaint sync -r niko-overlays
-emerge --ask --autounmask-write media-sound/fastpotify::niko-overlays
-```
-
-Review and apply any proposed keyword changes with `dispatch-conf`, then
-repeat the final `emerge` command.
-
-Everywhere else, build the single binary with Rust 1.95 or newer:
-
-```bash
-cargo install --path . --locked
-```
-
-MilkDrop uses libprojectM, which is built from source. This needs CMake, a C++
-compiler, and libclang. To build without MilkDrop or those tools, run
-`cargo install --path . --locked --no-default-features`. On Linux, you also need the
-development packages for ALSA, PulseAudio or PipeWire, and the windowing
-libraries. On Arch:
-
-```bash
-sudo pacman -S --needed alsa-lib libpulse libxkbcommon wayland cmake clang
-```
-
-and on Debian or Ubuntu:
-
-```bash
-sudo apt install libasound2-dev libpulse-dev libxkbcommon-dev libwayland-dev \
-  cmake clang libclang-dev
-```
-
-and on Fedora:
-
-```bash
-sudo dnf install alsa-lib-devel pulseaudio-libs-devel libxkbcommon-devel \
-  wayland-devel cmake clang libclang-devel
-```
-
-On Windows, libprojectM is built with Visual Studio 2022, CMake, LLVM, and
-vcpkg (`vcpkg install glew:x64-windows-static`, with
-`VCPKG_INSTALLATION_ROOT` pointing at the vcpkg folder).
-
-With [Nix](https://nixos.org), `nix develop` provides all of it, along with
-the exact toolchain `rust-toolchain.toml` pins.
-
-On macOS, the flake also exposes `packages.<system>.fastpotify-app`, an
-ad-hoc signed `Fastpotify.app` bundle for the Dock, Launch Services, and
-`spotify:` links. With nix-darwin, add it to `environment.systemPackages`
-and link `"/Applications"` through `environment.pathsToLink`; with Home
-Manager, `home.packages` is enough, as its darwin support links the bundle
-into `~/Applications`.
-
-Fastpotify uses system fonts for scripts not covered by its interface font,
-including Chinese, Japanese, Korean, Arabic, Hebrew, Thai, and Indic scripts.
-On macOS it draws each of them with the face the system itself uses, in the
-language order set in System Settings, so Chinese titles follow the
-Traditional or Simplified preference set there. Windows includes common
-fonts. On Linux, install `noto-fonts` and `noto-fonts-cjk` (Arch) or
-`fonts-noto` and `fonts-noto-cjk` (Debian or Ubuntu) if titles appear as
-empty boxes.
-
-A desktop entry is provided in `packaging/applications/fastpotify.desktop`.
-It registers Fastpotify for `spotify:` links; `xdg-mime default
-fastpotify.desktop x-scheme-handler/spotify` makes it the one the desktop
-uses when another Spotify client is installed too.
-
-## Sign in
-
-Press **Sign in with Spotify**. Your browser opens Spotify's consent page
-(Authorization Code with PKCE), so Fastpotify never sees your password. The
-app keeps its grants in the system credential store: Secret Service on Linux,
-Keychain on macOS, and Credential Manager on Windows. You usually sign in once
-per machine. If the store is unavailable or locked, a new sign-in works for
-this session and Fastpotify explains that it could not save it.
-
-Playing music **on this computer** needs a second, one-time browser approval.
-Spotify handles streaming separately from library access. Start it from the
-device menu (**Set up playback here**) or Settings. It needs Spotify
-Premium. Its reusable credential uses the same protected storage, independently
-of the two Web API grants.
-
-Existing token files migrate after the protected write has been read back
-successfully. A failed migration keeps the original for recovery and reports
-an error. Sign-out removes shared, personal, and playback grants, including
-legacy files and pending writes. Non-secret revocation markers prevent a
-failed keychain deletion from silently restoring a signed-out session.
-See [credential storage and file locations](docs/_reference/settings-and-files.md).
-On `main`, after 0.7.1, Flatpak also preserves its fallback state directory
-across full quits, including on older Flatpak versions.
-
-Playback approval requests Spotify's streaming permission separately. A
-verified personal app can complete sign-in while the shared app is busy.
-
-The Web API uses a shared app by default. You can add a personal Spotify
-Development Mode app in Settings → Account for a separate quota. Fastpotify
-still uses the shared app for requests that personal apps do not support.
-On `main`, after 0.7.1, Premium listeners using shared access see a one-time
-prompt explaining the personal app option, with a button that opens setup.
-Dismissal is remembered across restarts.
-
-## Account safety
-
-We are not aware of a Spotify account being suspended for using Fastpotify
-or another librespot player with Premium. Sign-in happens on Spotify's own
-pages, audio uses the quality included with Premium, DRM stays intact, and
-Fastpotify does not rip tracks or block ads.
-
-Reported suspensions usually involve modded apps that remove ads from free
-accounts, track ripping, or stream manipulation. Fastpotify does none of
-those things, and [CONTRIBUTING.md](CONTRIBUTING.md) prohibits them.
-
-## Keyboard shortcuts
-
-Hold `Shift` while turning the mouse wheel to scroll horizontal shelves,
-including Made for you and Recently played on Home.
-
-The main window exposes named playback controls, library and song rows,
-menus, sliders, and settings switches to screen readers. Use `Tab` and
-`Shift+Tab` to move focus, then `Enter` or `Space` to activate a control or
-play a focused song. Left and right arrows adjust a focused volume or seek
-slider. Windows testing with NVDA and accessibility for Winamp skins are
-still in progress.
-
-| Shortcut | What it does |
-| --- | --- |
-| `Space` | Play or pause |
-| `Ctrl+←` / `Ctrl+→` | Previous or next |
-| `Shift+←` / `Shift+→` | Seek 10 seconds |
-| `Ctrl+↑` / `Ctrl+↓` | Volume |
-| `M` | Mute |
-| `B` | Like or unlike the playing song |
-| `S` / `R` | Shuffle / cycle repeat |
-| `Q` | Queue panel |
-| `Ctrl+F` or `/` | Search |
-| `Ctrl+B` | Show or hide the sidebar |
-| `Alt+←` / `Alt+→` | Back or forward |
-| `Ctrl+H` / `Ctrl+L` | Home / Liked Songs |
-| `Ctrl+Shift+A` / `Ctrl+Shift+B` | Playing artist / album |
-| `Ctrl+M` | Winamp mini player |
-| `Ctrl+Shift+K` | MilkDrop |
-| `Ctrl+,` | Settings |
-| `Ctrl+/` or `?` | All shortcuts |
-| `Ctrl+Q` | Quit |
-
-On macOS, `Cmd` replaces `Ctrl`.
-
-## Controlling it from outside
-
-On Linux, Fastpotify is an MPRIS player, so `playerctl --player=fastpotify
-play-pause` already works.
-
-macOS and Windows have no such bus, so the same verbs are subcommands. They
-talk to the instance already running and print nothing on success:
+これは実際のセッションのログです。ある曲が次へ渡る瞬間(**値はすべて実測**)。
 
 ```
-fastpotify play-pause          fastpotify volume 40
-fastpotify play                fastpotify volume-up [percent]
-fastpotify pause               fastpotify volume-down [percent]
-fastpotify next                fastpotify mute
-fastpotify previous            fastpotify shuffle [on|off]
-fastpotify seek 15             fastpotify repeat [off|context|track]
-fastpotify seek -- -15         fastpotify like
-fastpotify seek-to 90          fastpotify play-uri spotify:playlist:37i9…
-fastpotify show                fastpotify transfer <device-id>
-fastpotify now-playing [--raw] fastpotify devices [--raw]
+cuepoints: playing  [in 10.81s out 262.58s  92.00 BPM]
+           incoming [in 20.73s out 253.46s  98.99 BPM]
+plan:      exit 262.58s   arrival 20.73s   overlap 10.44s   ratio 1.0760   source server
 ```
 
-`shuffle` and `repeat` toggle when used without an argument. Pass a state to
-set it directly. `like` adds or removes the playing track from your library.
+### 曲のどこを使うか
 
-`now-playing` prints one readable line. `--raw` prints tab-separated fields:
-state, title, artists, album, position_ms, duration_ms, volume, shuffle,
-repeat, art_url, saved, and device. `saved` is `yes`, `no`, or `unknown` while
-loading. New fields are appended to keep older scripts working.
+```
+実時間 →        0s                                              10.44s
+前の曲          ████████████████████████████████████████████████
+                ↑ 262.58s から抜け始める(曲末は 273.41s)
 
-`devices` lists Spotify Connect devices with the ID first and the active one
-marked with `*`. `--raw` prints JSON. The command refreshes the device list,
-so the first call after startup may be empty. Run it again if needed.
-
-A verb exits non-zero when Fastpotify is not running.
-
-On every platform, `fastpotify <link>` opens a Spotify link, a `spotify:`
-URI or an `open.spotify.com` address, in the running app, or starts the
-app on it. This is what the desktop runs when a link is clicked.
-
-Launchers such as Raycast or Alfred can use these commands. The Stream Deck
-plugin uses the same interface.
-
-## Settings
-
-Settings live in one readable JSON file (`~/.config/fastpotify/settings.json`
-on Linux). They include the Connect device name, bitrate, normalisation,
-autoplay, gapless playback, the audio backend (PulseAudio/PipeWire or ALSA on
-Linux), audio cache size, theme, sidebar state, whether pages take colour
-from artwork, and the mini player's skin and size.
-Playback settings apply when you press **Apply and restart playback**.
-The Settings page has its own search: type under the title to narrow the
-rows, clear the field to see everything again.
-You can also check for a new release from Settings. On macOS, the same command
-is in the application menu.
-
-On Windows and Linux, update-enabled portable downloads can download a release
-in the app, verify its published SHA-256 checksum, and restart to install it.
-Windows installer builds use their installer for the replacement. Settings can
-enable automatic background downloads; restarting always requires a click.
-The update popup opens only when you click the green update pill. Update checks
-and automatic downloads leave it closed, and closing it keeps downloads running.
-A failed startup restores the previous installation. An interrupted or damaged
-download leaves the running app alone. Updates keep your settings and sign-in
-files. On macOS, a writable Fastpotify.app downloaded from the release page can
-update its whole app bundle from the universal DMG. Move the app out of the disk
-image before updating. The updater verifies the app signature and version;
-Developer ID builds also require the same signing team and macOS approval.
-Keep the app in Applications; macOS can require folder access when it is run
-from Documents.
-
-Package-managed installations continue to update through their package manager,
-including Homebrew, Flatpak, apt, dnf, pacman, Nix, and Cargo. Unrecognized
-installations use the download page. Portable archives identify themselves with
-`fastpotify-portable.txt`; older archives need one manual upgrade to an
-update-enabled build.
-
-Caches (audio, artwork) live under the cache directory and can be deleted at
-any time without signing you out.
-
-## How it is built
-
-- `src/player.rs`: librespot playback, mixing, and Spotify Connect state.
-- `src/api/`: shared and personal Web API sessions, routing, concurrency, and
-  rate limits.
-- `src/backend.rs`: the tokio runtime and channels used by the interface.
-- `src/images.rs`: album art loading, caching, and accent-colour extraction.
-- `src/app.rs`, `src/model.rs`, `src/ui/`: state, navigation, and views.
-- `src/mpris.rs`: Linux media controls.
-
-Fastpotify pins its Rust toolchain in `rust-toolchain.toml`; `cargo test`
-covers the API models, dual-session routing, PKCE, the player state machine,
-and a headless render of every page, panel, and dialog.
-
-To look at the interface without a Spotify account, build with the `demo`
-feature and start it with sample data:
-
-```bash
-cargo run --features demo -- --demo --demo-page playlist:pl1 --demo-show queue
+次の曲                              ████████████████████████████
+                                    ↑ 20.73s から鳴らす → イントロが飛ぶ
 ```
 
-Demo mode never writes settings. `--demo-shot <PATH>` writes the window to a
-PNG and exits, which is useful for reproducible interface screenshots.
-`--demo-size WIDTHxHEIGHT` sets the window size for that shot.
+- **exit (262.58s)** — **前の曲の中**の位置。ここから抜け始めます。曲の終わりでは
+  **ありません**。まだ音楽がある場所で抜けて、残りをフェードしながら弾き切ります。
+- **arrival (20.73s)** — **次の曲の中**の位置。ここから鳴らすので、**イントロが丸ごと
+  飛びます**。「次曲のイントロが被って汚い」を消すのが、まさにこの部分です。
+- **overlap (10.44s)** — 重なりの長さ(**実時間**)。この図の横軸は実時間です。
+- **ratio (1.0760)** — 98.99 ÷ 92.00。テンポ合わせに使います。
 
-## Contributing
+> ⚠️ **exit と arrival は別々の曲の値です。** 上の2本は同じ横軸に並んでいますが、
+> **それぞれ別の曲の中の位置**です。1本の時間軸として足し算してはいけません。
+> GUI がレーンを分けているのはこのためです。
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening an issue or pull
-request. It covers project scope and required checks.
+### 重なりの10.44秒で何が起きるか
 
-Translations use standard gettext `.po` files in `assets/i18n/`, with an English
-`.pot` template. The current pilot translates navigation and Library labels in
-12 languages, including Portuguese and Chinese variants, in demo mode; the
-production interface remains English. See
-[Translating Fastpotify](docs/_reference/translating.md) for editing with existing
-translation tools, previewing, and reporting translation problems.
+**両方のデッキが同じ実効テンポを共有し、そのテンポが前の曲のものから次の曲のものへ
+滑っていきます。** どちらかが相手に「合わせる」のではなく、2曲が同じタイムラインを
+共有する形です。
 
-Issues and discussions receive automated triage, including reassessment after
-new or edited comments. A rocket on the report or comment means its assessment
-completed successfully; it does not promise a reply or a fix. See
-[automated triage](CONTRIBUTING.md#automated-triage) for details.
+```
+実時間 →    0s                    5.22s                 10.44s
+            │                     │                     │
+共有テンポ  92.00 BPM             95.43 BPM             98.99 BPM
+            │                     │                     │
+前の曲      262.58s               267.90s               273.41s
+  レート    1.000x                1.037x                1.076x
+  ゲイン    1.00                  0.71                  0.00   (cos)
+            │                     │                     │
+次の曲      20.73s                25.67s                30.80s
+  レート    0.929x                0.964x                1.000x
+  ゲイン    0.00                  0.71                  1.00   (sin)
+```
 
-## Acknowledgements
+出発点では両方が **92 BPM**、終点では両方が **98.99 BPM** です。その途中も常に一致
+します — 前の曲を `ratio^p` 倍、次の曲を `ratio^(p-1)` 倍で走らせると、実効テンポは
+どちらも `92.00 × ratio^p` になるからです。
 
-Fastpotify uses [librespot](https://github.com/librespot-org/librespot),
-[egui](https://github.com/emilk/egui), the [Inter](https://rsms.me/inter/)
-typeface (OFL), and [Lucide](https://lucide.dev) icons (ISC).
+片方だけが全部を負担すると、26% 離れたペアは1つのデッキで26%伸びることになり、
+keylock がきれいに保てる範囲を超えて音が壊れます。
 
-Fastpotify is an independent project and is not affiliated with Spotify.
-Spotify is a trademark of Spotify AB.
+> 📌 **「実時間」と「曲の中の位置」は別物です。** 実時間10.44秒に対し、前の曲は
+> **10.83秒ぶん**進み、次の曲は**10.07秒ぶん**進みます。上の図の 273.41s と 30.80s は
+> この積分値です。
 
-Licensed under the [MIT License](LICENSE).
+### フェードの形
 
-## Packaging maintenance
+等パワー(`cos` / `sin`)です。線形にすると重なりの中央で**約3 dB 落ちます** —
+別々の曲は相関がないので、線形フェードは音量が下がって聞こえます。
 
-Release packaging uses the [native-packages](https://rubygems.org/gems/native-packages) gem. `native-packages.yaml` declares packages and downstream repositories; native recipes and installation assets live in `packaging/`; see [PACKAGING.md](PACKAGING.md) for local commands and CI behavior.
+---
+
+## 値はどこから来るか
+
+**公式クライアントは耳で繋ぎ目を探していません。サーバに聞いています。**
+
+Spotify は曲ごとに「どこで入れて、どこで抜くか、そのテンポで」を配信しています。
+`ExtensionKind::CUEPOINTS`(= 28)の中身がこれです。
+
+```proto
+message Cuepoint {
+    int64 position_ms = 1;
+    float tempo_bpm   = 2;
+    Origin origin     = 3;   // HUMAN または ML
+}
+message Cuepoints {
+    Cuepoint fade_in_cuepoint  = 1;   // その曲が入る位置
+    Cuepoint fade_out_cuepoint = 2;   // その曲が抜ける位置
+}
+```
+
+**これをそのまま使うのが正解です。** 公式クライアント自身がこのキューに合わせて
+繋いでいるので、これを使ったプランは**サービスが意図した位置に一致**します。
+テンポもこのキューを測った時のものなので、別のテンポで混ぜるとビートがずれます。
+
+```
+                ┌──────────────────┐
+公式クライアント┤ CUEPOINTS (28)   ├ ← 同じ値を使う
+                └─────────┬────────┘
+                          │
+このフォーク              └──────────→ 同じ位置で繋がる
+```
+
+### 実測
+
+| 項目 | 結果 |
+|---|---|
+| cuepoint が返った曲 | **57 / 60** |
+| テンポ一致(自前トラッカーとの差) | **0.1% 以内**(外れた2曲はちょうどオクターブ違い) |
+| 返らなかった曲 | 3曲(恒久的。再試行しても同じ) |
+
+### ローカル解析は保険
+
+残り約5%のために、音声から同じものを推定する経路も持っています。
+ただし**測定の結果、明らかに劣ります**。
+
+| ローカル検出器が区間を見つけた曲 | 全体から | 実際に使える90秒プローブから |
+|---|---|---|
+| | **3 / 20** | **0 / 20** |
+
+**サーバ優先、ローカルは保険** — この順序はこの測定で決まりました。
+
+---
+
+## その他の工夫
+
+### 長さ — 整数小節
+
+`[4, 8, 2]` 小節の順に試し、長い方を優先します。遅い曲で4小節が下限 **1.5秒**を
+割る場合に8小節を使う、という並びです。上限は **12秒**(公式クライアントと同じ天井)。
+
+サーバのキューが小節1つ分の余地を残さない場合、**諦めずにその余地そのもの**を
+使います。前の曲はあるだけフェードするしかなく、短い重なりでも mix です。
+
+### 入場側は先にレンダリング
+
+伸縮を**境界の手前でレンダリング**してカーブとして再生します。ライブで走らせると、
+パケット単位で供給されるデッキが掃引レートで消費するため、**アンダーランするか
+デコーダが聴取位置を追い越す**かのどちらかになります。
+
+### ベースの受け渡し
+
+2曲が重なると**ベースがぶつかり、そこが一番濁ります**。200 Hz のシェルフが、
+重なりの間に低域を片方からもう片方へ移します。**同時に低域を持つのは常に1曲**です。
+
+### 手動スキップ
+
+遷移が仕込まれた状態でスキップすると、次の曲は**プランが示す位置から**始まります。
+ただしプランは**自分がどの曲への遷移かを名乗って**いて、実際にロードされる曲と
+**一致した時だけ**適用されます。位置は特定の曲の中の位置なので、別の曲に適用すると
+音楽と全く関係ない場所にシークしてしまいます。
+
+---
+
+## GUI での見え方
+
+シークバーの下に**レーンが1本**あります。分けているのは**値の所属が違うから**です。
+
+```
+再生中の曲のシークバー
+ ├────────────────────────────█████████────────┤    ← 帯 = 重なり区間
+                              ↑
+                      exit (262.58s)              ← 前の曲の中の位置
+
+レーン (同じ秒スケール)
+                    ↑
+            arrival (20.73s)                      ← 次の曲の中の位置
+```
+
+- **exit はシークバー本体**。再生中の曲の位置だからです。
+- **arrival はレーン**。**次の曲**の位置なので、本体に置くと「ある曲のピクセルを、
+  別の曲の数字で指す」ことになります。
+- 両方に**秒数のラベル**が付きます。1ピクセルが数秒になるので、位置だけでは値を
+  読み取れません。
+- **サーバ由来**と**ローカル解析**は色が違います。数字上は区別がつかないためです。
+
+---
+
+## 実運用でしか出ない不具合
+
+automix は何時間も走ります。だから**数百曲を再生して初めて出る**問題が本質です。
+以下はすべて実際のセッションで見つけ、計測し、**修正前に落ちるテスト**を付けてあります。
+
+| 症状 | 原因 | 実測 |
+|---|---|---|
+| 2曲目以降が1曲目のグリッドで計画される | 解析ワーカーが終わった曲の結果を保持し、水位も下がらないので新しい曲の構造が読まれない | bpm が 128.00 のまま固定 |
+| フェードアウトの線を超えても遷移しない | キューの**区切りマーカー**を次曲と誤認。`spotify:delimiter` はどの曲にも解釈できない | 51曲のキューで**9回**失敗 |
+| 同じプランを**297回**連続送信 | probe の窓を超えるキューは永遠にレンダリングできず、再試行に止まる条件がない | 最長3分間、毎秒1回 |
+| ヘッドセットを抜くと**アプリごと落ちる** | sink が起動しないと player が pause するが、旧コードはこれを異常状態と見て `exit(1)` | USB スピーカーで再現 |
+| 曲の途中で音が切れる | probe が sink と同じループで走り、未到着バイトでブロック | 中央値 **137 ms**、最悪数秒 |
+
+---
+
+## ファイル構成
+
+| ファイル | 役割 |
+|---|---|
+| `src/automix.rs` | ビートグリッド、セクション検出、テンポ折りたたみ、プラン生成 |
+| `src/automix_track.rs` | 収集 sink と解析ワーカースレッド |
+| `src/automix_cuepoints.rs` | サーバのキュー取得と、失敗理由の区別 |
+| `src/automix_driver.rs` | プレイヤーイベント → プラン。GUI が読む状態を公開 |
+| `src/player.rs` | キュー取得、プラン適用、壊れたセッションの復帰 |
+| `src/ui/player_bar.rs` | 遷移マーク、毎曲1行のログ |
+| `examples/automix_analyse.rs` | 実音源で検出器を走らせる(オフライン) |
+| `examples/tuner_probe.rs` | サーバのキューを取得して表示 |
+
+`cargo test` は計画の算術、キューのパース、上記の失敗経路、レーンを含むバーの
+ヘッドレスレンダリングを網羅しています。
+
+---
+
+## librespot 側
+
+繋ぎ目には、リリース版 librespot に無い機能が必要です(選んだ位置から曲を開始する、
+両方のデッキが同時に鳴る重なりを保持する、次曲を早く知る)。
+
+そのためこのアプリは
+**[Cinnamobot/librespot](https://github.com/Cinnamobot/librespot)** の `main`
+ブランチ(`[patch.crates-io]`、`Cargo.lock` がリビジョンを固定)に対してビルドします。
+
+> **基底のクロスフェードは本フォークの成果ではありません。**
+> [librespot-org/librespot#1756](https://github.com/librespot-org/librespot/pull/1756)
+> (@revolutionxk、本家でオープン中)のチェリーピックです。2つ目のデコーダ、
+> 等パワーランプ、sink 手前でのミックス、`PlayerConfig::crossfade` はその PR の
+> 成果です。**機構そのものの議論は本家 PR が適切な場所です。**
+
+追加分は以下です。
+
+| API | 役割 |
+|---|---|
+| `CrossfadePlan` | 各デッキの行き先、伸縮量、**遷移先の曲名**。名前を持つことで、そのプランが**今の境界のためのものか**を判定できる |
+| `PlayerEvent::UpcomingTrack` | 次に鳴る曲を、キューが知った時点で通知。プリロードが待つ**音声**の準備を待たない |
+| `PlayerEvent::IncomingPreloaded` | 次曲の短いプローブ。sink には前の曲しか届かないので、ミキサーを通らない曲のグリッドはこれで得る |
+| `read_is_ready` | 未到着バイトで音声スレッドが止まらないための判定 |
+| プリロード要求の再試行 | キューが空の瞬間に要求が消費されても、2秒間隔で最大8回まで再要求 |
+
+---
+
+## ライセンス / 帰属
+
+本家 [crmne/fastpotify](https://github.com/crmne/fastpotify) と
+[librespot-org/librespot](https://github.com/librespot-org/librespot) に基づきます。
+ライセンスは両者と同じ MIT です。Spotify とは無関係です。
