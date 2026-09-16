@@ -4,6 +4,7 @@ pub mod api;
 pub mod app;
 pub mod auth;
 pub mod automix;
+pub mod automix_cuepoints;
 pub mod automix_driver;
 pub mod automix_track;
 pub mod backend;

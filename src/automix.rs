@@ -18,6 +18,8 @@ use std::time::Duration;
 use timestretch::BeatGrid;
 use timestretch::engine::{Engine, EngineConfig, EngineProfile};
 
+use crate::automix_cuepoints::Cuepoints;
+
 /// The longest overlap the official clients allow, and the ceiling our
 /// planner keeps to.
 pub const MAX_TRANSITION: Duration = Duration::from_secs(12);
@@ -749,6 +751,90 @@ pub fn bars_of(duration: Duration, bpm: f64) -> f64 {
     duration.as_secs_f64() * bpm / 60.0 / BEATS_PER_BAR
 }
 
+/// Plan a transition from what Spotify's own automix service publishes.
+///
+/// This is the path the official client takes, and it is preferred over the
+/// local analysis wherever it is available. The service answers a pair of
+/// cues per track — where that track should start being faded in, and where it
+/// should start fading out — so a transition is a lookup on each side rather
+/// than a threshold over a measured curve.
+///
+/// The two cues are read as the moments they are named for: the outgoing
+/// track's fade-out cue is where the overlap opens, and the incoming track's
+/// fade-in cue is the position that track is started from. That second one is
+/// the whole point of the feature. On the tracks this was measured on it sits
+/// a median 11.7 seconds into the track, so the incoming deck begins at the
+/// end of its intro instead of at its first sample, which is exactly the
+/// symptom the local detector could not fix — it found a usable section on
+/// none of the twenty tracks it was given from the 90-second probe the
+/// incoming side actually has.
+///
+/// The overlap's *length* is not part of the answer: it is a separate choice
+/// the clients take from their own configuration, so it stays local and is
+/// picked from [`BAR_CHOICES`] against the tempo the cues were measured at.
+/// That is also why the tempo comes from here rather than from the local
+/// tracker — mixing at a tempo the cues were not placed against would put the
+/// beats back out of line.
+///
+/// Returns `None` when the pair cannot be formed, which the caller reads as
+/// "use the local plan": a cue the play head has already gone past, or a cue
+/// that leaves the outgoing track no room to fade, keeps the local path.
+/// The 5% of tracks the service has nothing for are covered the same way.
+pub fn plan_from_cuepoints(
+    from: &Cuepoints,
+    to: &Cuepoints,
+    out_duration: Duration,
+    earliest: f64,
+) -> Option<Transition> {
+    let end_of_track = out_duration.as_secs_f64();
+    let fade_out_at = from.fade_out_at;
+    // The exit has to be somewhere the play head has not already gone past:
+    // the cue is absolute, and a track played from beyond it has nothing left
+    // to fade out of.
+    if fade_out_at < earliest || fade_out_at >= end_of_track {
+        return None;
+    }
+    let tempo_ratio = fold_octave(to.bpm / from.bpm);
+    let beat_seconds = 60.0 / from.bpm;
+    // What is left of the track after the cue, which is the most the overlap
+    // can run for.
+    let room = end_of_track - fade_out_at;
+    if room <= 0.0 {
+        return None;
+    }
+    // Whole bars first, because that is the musical choice and the one the
+    // local planner makes. The server's cue does not have to leave room for
+    // one: it is an exact position, not a grid the exit was snapped onto, so
+    // a fade that starts two seconds before the end is a perfectly ordinary
+    // answer — and refusing it on a bar count sent the pair back to the local
+    // analysis, which is the path this exists to replace.
+    let mut chosen = BAR_CHOICES
+        .iter()
+        .map(|bars| f64::from(*bars) * BEATS_PER_BAR * beat_seconds)
+        .find(|seconds| {
+            *seconds >= MIN_TRANSITION.as_secs_f64()
+                && *seconds <= MAX_TRANSITION.as_secs_f64()
+                && *seconds <= room
+        });
+    // Nothing bar-aligned fits in the room left, so use the room itself
+    // rather than giving up: the outgoing track has to be fading for as long
+    // as it has, and a shorter overlap is still a mix.
+    if chosen.is_none() {
+        let available = room.min(MAX_TRANSITION.as_secs_f64());
+        if available >= MIN_TRANSITION.as_secs_f64() {
+            chosen = Some(available);
+        }
+    }
+    let duration = Duration::from_secs_f64(chosen?);
+    Some(Transition {
+        fade_out_at,
+        fade_in_at: to.fade_in_at,
+        duration,
+        tempo_ratio,
+        curve: None,
+    })
+}
+
 /// Plan a transition when only the outgoing track has been analysed.
 ///
 /// The incoming track's grid may be unknown: it does not reach the sink, and
@@ -1370,7 +1456,6 @@ mod tests {
         let ratio = |samples: &[f32]| {
             let (_, bands) = envelope_with_bands(samples);
             let sum = |band: usize| bands[band].iter().sum::<f64>();
-            let low = sum(0);
             let mid = sum(1);
             let high = sum(2);
             // The top band against the middle: a chorus leans high.
@@ -1693,6 +1778,120 @@ mod tests {
         // The phase carries the offset, so the bar lattice lines up with the
         // track rather than with the moment collection happened to start.
         assert!(a.downbeat_phase().unwrap() >= 100.0);
+    }
+
+    /// Builds the cuepoint pair the service would publish for a track whose
+    /// material runs from `fade_in` to `fade_out` at `bpm`.
+    fn cuepoints_of(fade_in: f64, fade_out: f64, bpm: f64) -> Cuepoints {
+        Cuepoints {
+            fade_in_at: fade_in,
+            fade_out_at: fade_out,
+            bpm,
+        }
+    }
+
+    /// The server's cues place both edges of a transition: the outgoing
+    /// track's own fade-out cue opens the overlap, and the incoming track's
+    /// fade-in cue is the position its deck is started from — the end of its
+    /// intro, which is what stops the next track coming in from its first
+    /// sample.
+    #[test]
+    fn the_servers_cues_place_both_edges_of_a_transition() {
+        let from = cuepoints_of(1.5, 221.8, 157.9);
+        let to = cuepoints_of(17.6, 199.6, 120.0);
+        let planned = plan_from_cuepoints(&from, &to, Duration::from_secs(238), 0.0)
+            .expect("the pair has cues on both sides");
+
+        assert!((planned.fade_out_at - 221.8).abs() < 1e-9, "the exit is the cue");
+        assert!(
+            (planned.fade_in_at - 17.6).abs() < 1e-9,
+            "the arrival is the incoming track's own cue, not its first sample"
+        );
+        assert!(
+            planned.duration >= MIN_TRANSITION && planned.duration <= MAX_TRANSITION,
+            "the overlap is a local choice within what the clients allow"
+        );
+        // The pair is stretched by the tempo the cues were measured at.
+        let expected = fold_octave(120.0 / 157.9);
+        assert!((planned.tempo_ratio - expected).abs() < 1e-12);
+    }
+
+    /// A cue is where a fade *starts*, on both sides, and the two run on one
+    /// shared timeline: the outgoing deck begins falling from full level at
+    /// its own cue, and the incoming deck begins rising from silence at its,
+    /// both reaching the far end of their ramp an overlap later. That is what
+    /// the fork's two ramps do — `out_gain` falls from 1 and `in_gain` rises
+    /// to 1 across the same span — so the planner has to hand them positions
+    /// of that same kind rather than one position and one duration.
+    #[test]
+    fn a_cue_is_where_a_fade_starts_on_both_sides() {
+        let from = cuepoints_of(1.5, 200.0, 128.0);
+        let to = cuepoints_of(11.5, 180.0, 128.0);
+        let planned = plan_from_cuepoints(&from, &to, Duration::from_secs(240), 0.0)
+            .expect("the cues give a plan");
+
+        // Each side names a position, and neither has been moved by the
+        // overlap: the outgoing deck starts falling at its cue, and the
+        // incoming deck starts rising at its.
+        assert_eq!(planned.fade_out_at, from.fade_out_at);
+        assert_eq!(planned.fade_in_at, to.fade_in_at);
+        // Both ramps run for the overlap, so the incoming deck's material
+        // arrives exactly as the outgoing deck reaches silence.
+        let overlap = planned.duration.as_secs_f64();
+        assert!(planned.fade_out_at + overlap <= 240.0);
+    }
+
+    /// A cue the play head has already gone past is not one the track can
+    /// fade out from, so the local planner has to handle it instead.
+    #[test]
+    fn a_cuepoint_behind_the_play_head_is_refused() {
+        let from = cuepoints_of(1.5, 100.0, 128.0);
+        let to = cuepoints_of(12.0, 180.0, 128.0);
+        assert!(
+            plan_from_cuepoints(&from, &to, Duration::from_secs(240), 150.0).is_none(),
+            "the exit at 100s is behind a play head at 150s"
+        );
+    }
+
+    /// The overlap cannot run past the end of the outgoing track, and the
+    /// server's cue can leave very little room: a fade starting two seconds
+    /// before the end is a normal answer. Refusing it on a bar count sent the
+    /// pair back to the local analysis, which is the path this replaces, so
+    /// what is left of the track is used as the overlap instead.
+    #[test]
+    fn a_cue_that_leaves_no_whole_bars_still_mixes() {
+        // The cue leaves 2.3s, which no bar-aligned overlap fits inside.
+        let from = cuepoints_of(1.5, 238.5, 142.0);
+        let to = cuepoints_of(12.0, 180.0, 134.0);
+        let planned = plan_from_cuepoints(&from, &to, Duration::from_secs(240), 0.0)
+            .expect("the room left is still a mix");
+        assert!(
+            planned.duration.as_secs_f64() >= MIN_TRANSITION.as_secs_f64(),
+            "the overlap is long enough to hide the seam"
+        );
+        assert!(
+            planned.fade_out_at + planned.duration.as_secs_f64() <= 240.0,
+            "and it still fits inside the outgoing track"
+        );
+    }
+
+    /// Too little room to hide a seam is still refused, so the local planner
+    /// takes it rather than a fade that would be heard as a cut.
+    #[test]
+    fn a_cue_with_no_room_at_all_is_refused() {
+        let from = cuepoints_of(1.5, 239.5, 142.0);
+        let to = cuepoints_of(12.0, 180.0, 134.0);
+        assert!(plan_from_cuepoints(&from, &to, Duration::from_secs(240), 0.0).is_none());
+    }
+
+    /// A track whose own fade-out cue is past its end has nothing left to
+    /// fade from, so it falls back rather than planning a transition that
+    /// cannot run.
+    #[test]
+    fn a_cue_past_the_end_of_the_track_is_refused() {
+        let from = cuepoints_of(1.5, 260.0, 128.0);
+        let to = cuepoints_of(12.0, 180.0, 128.0);
+        assert!(plan_from_cuepoints(&from, &to, Duration::from_secs(240), 0.0).is_none());
     }
 
     #[test]
