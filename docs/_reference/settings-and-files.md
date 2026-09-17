@@ -207,6 +207,8 @@ main fields are:
 | `milkdrop_fullscreen` | `false` | The MilkDrop window fills the screen |
 | `milkdrop_size` | `640, 480` | The MilkDrop window's size in points |
 | `keep_playing_in_background` | `true` | Close to tray |
+| `backdrop` | `automatic` | Windows 11 Acrylic background: `automatic`, `acrylic`, `opaque`. Older `mica` and `mica-alt` values read as `acrylic` |
+| `backdrop_opacity` | `25` | How much of the app's own colour covers the Acrylic, 10 to 90 percent |
 | `web_client_id` | none | Optional personal Spotify app id used alongside shared coverage |
 | `personal_app_nudge_at` | none | Legacy daily-reminder timestamp, retained for older releases |
 | `personal_app_intro_seen` | `false` | Whether the Premium personal-app introduction was dismissed or followed (on `main`, after 0.7.1) |

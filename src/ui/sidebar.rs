@@ -228,7 +228,6 @@ fn order_entries(app: &App, shelf: Filter, sort: LibrarySort, entries: &mut [Ent
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    let palette = app.palette;
     // The traffic lights float over the top-left of the sidebar now, so the
     // first nav row has to start below them.
     let top = 12 + theme::titlebar_inset(ui.ctx()) as i8;
@@ -237,7 +236,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .default_size(app.settings.sidebar_width)
         .size_range(210.0..=440.0)
         .show_separator_line(false)
-        .frame(Frame::new().fill(palette.panel).inner_margin(Margin {
+        .frame(Frame::new().fill(app.content_fill()).inner_margin(Margin {
             left: 12,
             right: 8,
             top,

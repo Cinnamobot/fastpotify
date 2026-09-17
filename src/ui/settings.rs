@@ -618,6 +618,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     }
 
+    // Named here so the row and its detail stay together, and so the one
+    // platform that has DWM materials can say so without a second sentence.
+    #[cfg(windows)]
+    const BACKDROP_DETAIL: &str =
+        "Windows 11 Acrylic: the windows behind show through this one.";
+    #[cfg(not(windows))]
+    const BACKDROP_DETAIL: &str =
+        "Windows 11 draws Acrylic behind the window; other platforms keep the app's own background.";
     let appearance_rows = [
         RowText::new("Theme", {
             let detail = app
@@ -632,6 +640,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         RowText::new(
             "Colour from album art",
             "Use the current cover's colour on pages and the player bar.",
+        ),
+        RowText::new("Background material", BACKDROP_DETAIL),
+        RowText::new(
+            "Transparency",
+            "How much of the app's own colour covers the Acrylic. Higher is flatter and hides more of what is behind.",
         ),
         RowText::new(
             "Compact library sidebar",
@@ -747,6 +760,69 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 "Appearance",
                 &appearance_rows[2],
                 |ui| {
+                    ui.with_layout(Layout::top_down(Align::Max), |ui| {
+                        let selected = app.settings.backdrop.label();
+                        let response = egui::ComboBox::from_id_salt("appearance_backdrop")
+                            .selected_text(selected)
+                            .width(200.0_f32.min(ui.available_width()))
+                            .show_ui(ui, |ui| {
+                                for choice in crate::backdrop::Choice::ALL {
+                                    if ui
+                                        .selectable_label(
+                                            app.settings.backdrop == choice,
+                                            choice.label(),
+                                        )
+                                        .clicked()
+                                        && app.settings.backdrop != choice
+                                    {
+                                        app.actions.push(Action::SetBackdrop(choice));
+                                    }
+                                }
+                            });
+                        // A combo box carries no name of its own; without this
+                        // a screen reader announces it as an unnamed list.
+                        response.response.widget_info(|| {
+                            let mut info = egui::WidgetInfo::labeled(
+                                egui::WidgetType::ComboBox,
+                                ui.is_enabled(),
+                                "Background material",
+                            );
+                            info.current_text_value = Some(selected.to_owned());
+                            info
+                        });
+                    });
+                },
+            );
+            filtered_row(
+                ui,
+                &palette,
+                &needle,
+                "Appearance",
+                &appearance_rows[3],
+                |ui| {
+                    let mut amount = i32::from(app.settings.backdrop_opacity.0);
+                    let range = crate::backdrop::Opacity::RANGE;
+                    let slider = egui::Slider::new(
+                        &mut amount,
+                        i32::from(*range.start())..=i32::from(*range.end()),
+                    )
+                    .suffix("%")
+                    .text("");
+                    if ui.add(slider).changed() {
+                        app.actions
+                            .push(Action::SetBackdropOpacity(crate::backdrop::Opacity(
+                                amount.clamp(0, 255) as u8,
+                            )));
+                    }
+                },
+            );
+            filtered_row(
+                ui,
+                &palette,
+                &needle,
+                "Appearance",
+                &appearance_rows[4],
+                |ui| {
                     if widgets::switch(
                         ui,
                         &palette,
@@ -764,7 +840,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 &needle,
                 "Appearance",
-                &appearance_rows[3],
+                &appearance_rows[5],
                 |ui| {
                     if widgets::switch(
                         ui,
@@ -783,7 +859,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 &needle,
                 "Appearance",
-                &appearance_rows[4],
+                &appearance_rows[6],
                 |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;

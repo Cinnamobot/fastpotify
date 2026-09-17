@@ -525,6 +525,21 @@ pub(crate) fn run() -> eframe::Result<()> {
                     }
                 }
                 app.attach(&cc.egui_ctx);
+                let big_window = !app.settings.winamp_window;
+                #[cfg(windows)]
+                let hwnd = {
+                    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                    match cc.window_handle().map(|handle| handle.as_raw()) {
+                        Ok(RawWindowHandle::Win32(window)) => Some(window.hwnd.get()),
+                        _ => None,
+                    }
+                };
+                #[cfg(not(windows))]
+                let hwnd = None;
+                // The Winamp mini player draws its own alpha over a shaped
+                // region; a material behind it would show through the skin's
+                // cut-outs, so it keeps the look it has always had.
+                app.probe_backdrop(if big_window { hwnd } else { None });
                 #[cfg(windows)]
                 let thumbbar = {
                     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -758,8 +773,17 @@ fn native_options(
                 .with_titlebar_shown(false)
                 .with_title_shown(false)
                 // Windows has no equivalent to macOS's floating traffic lights.
-                // Removing its decorations lets the app surface fill the window.
+                // Removing its decorations lets the app surface fill the window,
+                // and it is also what leaves the caption to the app: DWM would
+                // otherwise draw its own Minimize/Maximize/Close over the client
+                // area, on top of the ones `ui::window_controls` draws.
                 .with_decorations(main_window_decorated(cfg!(windows)))
+                // Windows: a transparent window is what lets DWM composite a
+                // backdrop material behind this one, at the per-pixel alpha the
+                // app renders. Without it the material is drawn behind an opaque
+                // client area and never shows. The app clears to its own colour
+                // whenever no material is live, so this costs nothing elsewhere.
+                .with_transparent(cfg!(windows))
                 .with_inner_size(size)
                 .with_min_inner_size(inner_size.unwrap_or([760.0, 520.0]))
                 .with_fullscreen(fullscreen);
@@ -849,6 +873,9 @@ mod native_window_tests {
         assert_eq!(options.viewport.fullsize_content_view, Some(true));
         assert_eq!(options.viewport.titlebar_shown, Some(false));
         assert_eq!(options.viewport.title_shown, Some(false));
+        // Windows needs the transparent window for a backdrop material to show;
+        // the other platforms draw their own title bars and must not change.
+        assert_eq!(options.viewport.transparent, Some(cfg!(windows)));
     }
 
     #[test]
@@ -1099,15 +1126,27 @@ impl eframe::App for Shell {
         }
     }
 
-    /// The mini player's window is see-through where the skin leaves it
-    /// out; the big window paints itself over eframe's own ground.
+    /// The mini player's window is see-through where the skin leaves it out,
+    /// and so is the big window once DWM is drawing a material behind it.
+    /// Otherwise the big window paints itself over eframe's own ground.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        // The mini player's skin cuts its own shape out of the window; a live
+        // material is the ground the app draws over. Both need DWM to see
+        // through this ground to what is underneath.
         if self
             .app
             .as_ref()
-            .is_some_and(|app| app.settings.winamp_window)
+            .is_some_and(|app| app.settings.winamp_window || app.material.is_some())
         {
             [0.0; 4]
+        } else if cfg!(windows) {
+            // Windows: the main window is created transparent, so this ground
+            // is what shows wherever no panel covers it. Alpha 180 was enough
+            // over an opaque window; with nothing behind it, it would render
+            // half-transparent and leak the desktop through. The app's own
+            // fills are drawn over this, so painting it solid is both correct
+            // and cheaper to composite.
+            egui::Color32::from_rgb(12, 12, 12).to_normalized_gamma_f32()
         } else {
             egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()
         }

@@ -173,6 +173,10 @@ pub struct Settings {
     /// Explicit order per Library shelf. Missing shelves keep their previous
     /// behaviour; selecting another order never deletes the local arrangement.
     pub library_sort: std::collections::BTreeMap<LibraryShelf, LibrarySort>,
+    /// Windows 11 background material. Ignored where DWM has none.
+    pub backdrop: crate::backdrop::Choice,
+    /// How much of the app's own colour sits over that material, in percent.
+    pub backdrop_opacity: crate::backdrop::Opacity,
     /// Interface zoom, egui's zoom factor; Ctrl+plus/minus changes it.
     pub zoom: f32,
     /// The Winamp window is open.
@@ -265,6 +269,8 @@ impl Default for Settings {
             liked_songs_pinned: true,
             sidebar_order: Vec::new(),
             library_sort: std::collections::BTreeMap::new(),
+            backdrop: crate::backdrop::Choice::default(),
+            backdrop_opacity: crate::backdrop::Opacity::default(),
             zoom: 1.0,
             winamp_window: false,
             winamp_show_taskbar: true,
@@ -443,6 +449,18 @@ mod tests {
     fn older_settings_keep_the_sidebar_visible() {
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert!(settings.sidebar_visible);
+    }
+
+    #[test]
+    fn older_settings_follow_windows_for_the_background_material() {
+        // A settings file written before the material existed: the window has
+        // to keep the look it had, which is the material Windows offers.
+        let settings: Settings = serde_json::from_str(r#"{"zoom": 1.2}"#).unwrap();
+        assert_eq!(settings.backdrop, crate::backdrop::Choice::Automatic);
+        // And a file that names one keeps it.
+        let settings: Settings =
+            serde_json::from_str(r#"{"backdrop":"acrylic"}"#).unwrap();
+        assert_eq!(settings.backdrop, crate::backdrop::Choice::Acrylic);
     }
 
     #[test]

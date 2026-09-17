@@ -986,6 +986,10 @@ pub enum Action {
     ToggleDevicesPopup,
     SettingsChanged,
     SetTheme(crate::settings::ThemeChoice),
+    /// Pick the Windows background material, or turn it off.
+    SetBackdrop(crate::backdrop::Choice),
+    /// Set how much of the app's own colour sits over the material.
+    SetBackdropOpacity(crate::backdrop::Opacity),
     OpenThemesFolder,
     SetCustomTheme(String),
     ReloadThemes,

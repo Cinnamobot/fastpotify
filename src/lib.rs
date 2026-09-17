@@ -9,6 +9,7 @@ pub mod automix_driver;
 pub mod automix_track;
 pub mod autoscroll;
 pub mod backend;
+pub mod backdrop;
 pub mod bidi;
 pub mod credentials;
 #[cfg(any(test, feature = "demo"))]

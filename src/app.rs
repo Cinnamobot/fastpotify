@@ -210,6 +210,18 @@ pub struct App {
     pub locale: crate::i18n::Locale,
     /// Whether this window's native backend can keep it above other windows.
     pub window_level_supported: bool,
+    /// The background material DWM is drawing, once a window exists. `None`
+    /// means the app paints its own background, which is also what every
+    /// platform without DWM materials does.
+    pub material: Option<crate::backdrop::Material>,
+    /// What this Windows build and machine can do, read once.
+    pub backdrop_support: Option<crate::backdrop::Support>,
+    /// The material the window has been told about, so a theme switch or a
+    /// settings change only talks to DWM when the answer differs.
+    applied_backdrop: Option<(crate::backdrop::Material, bool)>,
+    /// This window's handle, for the DWM calls. `None` before eframe creates
+    /// the window, and in the tray-only state after it is gone.
+    hwnd: Option<isize>,
     #[cfg(any(test, feature = "demo"))]
     pub demo_windows_controls: bool,
     applied_dark: Option<bool>,
@@ -553,6 +565,10 @@ impl App {
             palette,
             locale: crate::i18n::Locale::English,
             window_level_supported: true,
+            material: None,
+            backdrop_support: None,
+            applied_backdrop: None,
+            hwnd: None,
             #[cfg(any(test, feature = "demo"))]
             demo_windows_controls: false,
             applied_dark: None,
@@ -723,6 +739,71 @@ impl App {
 
     /// Per-window setup: fonts, icons, loaders, theme. Called every time a
     /// window is (re)created around this long-lived application state.
+    /// Reads what this machine can do with DWM materials. Called once per
+    /// window; the answers are fixed for the process, but a Windows build can
+    /// outlive one window and the read is cheap.
+    pub fn probe_backdrop(&mut self, hwnd: Option<isize>) {
+        self.backdrop_support = Some(crate::backdrop::support());
+        let support = self.backdrop_support.expect("just set");
+        self.material = support.material(self.settings.backdrop);
+        // The window may outlive this call and the material may be refused;
+        // `None` keeps the app painting its own background either way.
+        self.hwnd = hwnd;
+        self.applied_backdrop = None;
+        self.sync_backdrop(self.palette.dark);
+    }
+
+    /// Re-decides the material after the setting changes, then applies it.
+    pub fn resolve_backdrop(&mut self) {
+        let support = self.backdrop_support.unwrap_or_else(crate::backdrop::support);
+        let wanted = support.material(self.settings.backdrop);
+        match wanted {
+            Some(material) => {
+                self.material = Some(material);
+                // Let the next sync actually reach DWM even if the material
+                // has not changed: the window may have been showing none.
+                self.applied_backdrop = None;
+                self.sync_backdrop(self.palette.dark);
+            }
+            None => {
+                self.material = None;
+                self.sync_backdrop(self.palette.dark);
+            }
+        }
+    }
+
+    /// Tells DWM about the material, once, when the answer changes.
+    #[cfg(windows)]
+    pub fn sync_backdrop(&mut self, dark: bool) {
+        let Some(material) = self.material else {
+            if self.applied_backdrop.is_some() {
+                if let Some(hwnd) = self.hwnd {
+                    crate::backdrop::clear(crate::backdrop::Window(hwnd));
+                }
+                self.applied_backdrop = None;
+            }
+            return;
+        };
+        if self.applied_backdrop == Some((material, dark)) {
+            return;
+        }
+        let Some(hwnd) = self.hwnd else {
+            return;
+        };
+        if crate::backdrop::apply(crate::backdrop::Window(hwnd), material, dark) {
+            self.applied_backdrop = Some((material, dark));
+        } else {
+            // DWM refused. Fall back to our own background rather than leaving
+            // a transparent window over nothing.
+            self.material = None;
+            self.applied_backdrop = None;
+        }
+    }
+
+    /// Nothing to sync where there are no DWM materials.
+    #[cfg(not(windows))]
+    pub fn sync_backdrop(&mut self, _dark: bool) {}
+
     pub fn attach(&mut self, ctx: &egui::Context) {
         theme::install(ctx);
         ctx.add_bytes_loader(std::sync::Arc::new(self.backend.art().clone()));
@@ -1344,6 +1425,34 @@ impl App {
     }
 
     /// The colour to tint the interface with, from the playing art.
+    /// The window's base fill, under every panel.
+    ///
+    /// Transparent while Acrylic is live: Acrylic is the base layer, so the
+    /// only way the real material reaches the eye is for the app to leave this
+    /// clear and let its translucent panels sit directly over DWM's material.
+    /// Painting it opaque would hide the material behind the app's own colour
+    /// instead. Pages without a full-width panel therefore show nothing but
+    /// material -- which is the point.
+    pub fn base_fill(&self) -> Color32 {
+        crate::backdrop::base_fill(&self.palette, self.material, self.settings.backdrop_opacity)
+    }
+
+    /// A content panel's fill over [`Self::base_fill`].
+    pub fn content_fill(&self) -> Color32 {
+        crate::backdrop::content_fill(&self.palette, self.material, self.settings.backdrop_opacity)
+    }
+
+    /// A page header wash: the window colour with a hint of the cover, held
+    /// translucent so the material still reaches the eye.
+    ///
+    /// Blended from the opaque palette colour and then given the wash's own
+    /// alpha, rather than blended from [`Self::base_fill`]: a blend that starts
+    /// from alpha 0 would fade the tint away with it.
+    pub fn wash(&self, tint: Color32, strength: f32) -> Color32 {
+        let blended = crate::ui::blend(self.palette.window, tint, strength);
+        crate::backdrop::wash_fill(blended, self.material, self.settings.backdrop_opacity)
+    }
+
     pub fn now_playing_tint(&self) -> Option<Color32> {
         if !self.settings.accent_from_art {
             return None;
@@ -2479,6 +2588,8 @@ impl App {
             self.applied_dark = Some(dark);
             self.accents.clear();
             self.accent_pending.clear();
+            // DWM tints the material by the window's own light/dark mode.
+            self.sync_backdrop(dark);
         }
     }
 
@@ -6858,6 +6969,19 @@ impl App {
                     .sidebar_order
                     .retain(|key| !self.settings.pinned_contexts.contains(key));
                 self.mark_settings_dirty();
+            }
+            Action::SetBackdropOpacity(opacity) => {
+                if self.settings.backdrop_opacity != opacity {
+                    self.settings.backdrop_opacity = opacity;
+                    self.mark_settings_dirty();
+                }
+            }
+            Action::SetBackdrop(choice) => {
+                if self.settings.backdrop != choice {
+                    self.settings.backdrop = choice;
+                    self.mark_settings_dirty();
+                    self.resolve_backdrop();
+                }
             }
             Action::SetTheme(choice) => {
                 self.settings.theme = choice;

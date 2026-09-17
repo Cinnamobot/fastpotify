@@ -103,10 +103,11 @@ fn page_tint(app: &mut App) -> Option<Color32> {
 }
 
 fn central(app: &mut App, ui: &mut egui::Ui) {
-    let palette = app.palette;
     let tint = page_tint(app);
+    // Under a DWM material this is transparent: the material is the ground.
+    let base = app.base_fill();
     egui::CentralPanel::default()
-        .frame(Frame::new().fill(palette.window))
+        .frame(Frame::new().fill(base))
         .show(ui, |ui| {
             let rect = ui.max_rect();
             if let Some(tint) = tint {
@@ -118,9 +119,16 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     0.85
                 };
-                let top = blend(palette.window, tint, strength);
+                let top = app.wash(tint, strength);
                 let header = Rect::from_min_size(rect.min, vec2(rect.width(), 340.0));
-                widgets::paint_vertical_gradient(ui, header, top, palette.window);
+                widgets::paint_vertical_gradient(ui, header, top, base);
+            } else if app.material.is_some() {
+                // Acrylic live and nothing to tint the page with: the base is
+                // transparent, so without this the page would sit straight on
+                // whatever is behind the window. One coat of the app's own
+                // colour, at the transparency setting, so text keeps a ground
+                // while the material still shows through it.
+                ui.painter().rect_filled(rect, 0.0, app.content_fill());
             }
             ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
             topbar::show(app, ui);

@@ -10,19 +10,21 @@ use crate::theme;
 pub fn show(app: &mut App, ui: &mut egui::Ui, connecting: bool) {
     let palette = app.palette;
     let ctx = ui.ctx().clone();
+    let base = app.base_fill();
+    let panel = app.content_fill();
     egui::CentralPanel::default()
-        .frame(Frame::new().fill(palette.window))
+        .frame(Frame::new().fill(base))
         .show(ui, |ui| {
             let rect = ui.max_rect();
             super::titlebar_drag(ui, rect);
-            let top = super::blend(palette.window, palette.accent, 0.10);
-            super::widgets::paint_vertical_gradient(ui, rect, top, palette.window);
+            let top = app.wash(palette.accent, 0.10);
+            super::widgets::paint_vertical_gradient(ui, rect, top, base);
             let card_width = 440.0;
             let card_height = 380.0;
             let card = egui::Rect::from_center_size(rect.center() - Vec2::new(0.0, 20.0), Vec2::new(card_width, card_height));
             let mut card_ui = ui.new_child(egui::UiBuilder::new().max_rect(card).layout(Layout::top_down(Align::Center)));
             Frame::new()
-                .fill(palette.panel)
+                .fill(panel)
                 .stroke(Stroke::new(1.0, palette.outline))
                 .corner_radius(CornerRadius::same(theme::RADIUS + 8))
                 .inner_margin(Margin::same(36))

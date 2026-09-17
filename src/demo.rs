@@ -2628,6 +2628,103 @@ mod tests {
         app.backend.shutdown();
     }
 
+    /// The background-material row is the one place the setting can be reached
+    /// from, so it has to render with the current choice, be findable by its
+    /// description, and put the picked choice on the action queue.
+    #[test]
+    fn the_background_material_row_shows_and_picks_the_current_choice() {
+        use crate::backdrop::Choice;
+        use egui::accesskit::Role;
+        let (ctx, mut app) = accessible_app("backdrop-row");
+        app.open(Page::Settings);
+        app.settings.backdrop = Choice::Acrylic;
+        // Filter to the row so it is on screen without scrolling.
+        ctx.data_mut(|data| {
+            data.insert_temp(egui::Id::new("settings-filter"), "Acrylic".to_string())
+        });
+        for _ in 0..3 {
+            view_frame(&ctx, &mut app, vec![], crate::ui::settings::show);
+        }
+        let tree = accessible_frame(&ctx, &mut app, vec![]);
+        let id = accessible_node(&tree, "Background material", Role::ComboBox);
+        let node = &tree
+            .nodes
+            .iter()
+            .find(|(node_id, _)| *node_id == id)
+            .unwrap()
+            .1;
+        assert_eq!(node.value(), Some("Acrylic"));
+
+        // Every choice has to be offered, or a material could not be undone.
+        for choice in Choice::ALL {
+            app.settings.backdrop = choice;
+            for _ in 0..2 {
+                view_frame(&ctx, &mut app, vec![], crate::ui::settings::show);
+            }
+            let tree = accessible_frame(&ctx, &mut app, vec![]);
+            let id = accessible_node(&tree, "Background material", Role::ComboBox);
+            let node = &tree
+                .nodes
+                .iter()
+                .find(|(node_id, _)| *node_id == id)
+                .unwrap()
+                .1;
+            assert_eq!(
+                node.value(),
+                Some(choice.label()),
+                "{choice:?} must be the label the row reports"
+            );
+        }
+
+        // Picking one goes through the action, not a direct write, so the DWM
+        // re-apply is what actually changes the window.
+        app.settings.backdrop = Choice::Automatic;
+        for choice in Choice::ALL {
+            app.apply(crate::model::Action::SetBackdrop(choice), &ctx);
+            assert_eq!(app.settings.backdrop, choice);
+        }
+        app.apply(crate::model::Action::SetBackdrop(Choice::Opaque), &ctx);
+        assert!(
+            app.material.is_none(),
+            "opaque must not leave a material behind"
+        );
+
+        // The transparency row has to be reachable and to move the setting.
+        app.settings.backdrop = Choice::Acrylic;
+        let range = crate::backdrop::Opacity::RANGE;
+        for (label, value) in [
+            ("Transparency", *range.start()),
+            ("Transparency", *range.end()),
+            ("Transparency", crate::backdrop::Opacity::DEFAULT.0),
+        ] {
+            ctx.data_mut(|data| {
+                data.insert_temp(egui::Id::new("settings-filter"), label.to_string())
+            });
+            for _ in 0..3 {
+                view_frame(&ctx, &mut app, vec![], crate::ui::settings::show);
+            }
+            app.apply(
+                crate::model::Action::SetBackdropOpacity(crate::backdrop::Opacity(value)),
+                &ctx,
+            );
+            assert_eq!(app.settings.backdrop_opacity.0, value);
+        }
+        // A headless app has no window, so no material is live and the app
+        // paints itself opaquely whatever the setting says. Force one on to
+        // check the setting is what drives the layers.
+        app.material = Some(crate::backdrop::Material::Acrylic);
+        for value in [*range.start(), crate::backdrop::Opacity::DEFAULT.0, *range.end()] {
+            app.settings.backdrop_opacity = crate::backdrop::Opacity(value);
+            let opacity = crate::backdrop::Opacity(value);
+            assert_eq!(app.base_fill().a(), opacity.base_alpha(), "{value}");
+            assert_eq!(app.content_fill().a(), opacity.panel_alpha(), "{value}");
+        }
+        // And with no material the layers go back to being fully opaque.
+        app.material = None;
+        assert_eq!(app.content_fill().a(), 255);
+        app.backend.shutdown();
+    }
+
     #[test]
     fn themes_folder_button_is_visible_accessible_and_emits_an_action() {
         let (ctx, mut app) = accessible_app("themes-folder-button");

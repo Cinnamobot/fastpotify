@@ -14,8 +14,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
     let tint = app.now_playing_tint();
     let fill = match tint {
-        Some(tint) => super::blend(palette.panel, tint, 0.12),
-        None => palette.panel,
+        Some(tint) => app.wash(tint, 0.12),
+        None => app.content_fill(),
     };
     egui::Panel::bottom("player-bar")
         .exact_size(theme::PLAYER_BAR_HEIGHT)

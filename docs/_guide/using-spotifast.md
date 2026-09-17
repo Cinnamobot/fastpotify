@@ -219,6 +219,35 @@ Use your desktop's window rule or shortcut instead. In KDE Plasma, configure
 Window Management**. Your saved preference remains available when you use
 Spotifast on a supported backend again.
 
+## Background material (Windows 11)
+
+**Settings > Appearance > Background material** picks what Windows draws behind
+the window. **Follow Windows** (the default) uses Acrylic, so the windows behind
+this one show through it. Windows documents Acrylic for menus and flyouts rather
+than a whole window, and it costs more to compose, so expect it to be turned off
+under Battery Saver. **Opaque** paints the app's own background and asks Windows
+for nothing.
+
+Windows 11's other materials, Mica and Mica Alt, are not offered: both are opaque
+and carry the wallpaper colour once, so they never show what is behind the
+window.
+
+**Transparency** sets how much of the app's own colour covers the material --
+panels, sidebar, player bar and the page itself. Lower leaves more of a thin
+wash over the glass; higher is flatter and hides more of what is behind the
+window. One number covers every layer, so text stays as readable at either end.
+The slider only means anything while a material is live: with the background set
+to **Opaque** there is nothing underneath to see.
+
+Acrylic's own density is Windows', not the app's: `DWMSBT_TRANSIENTWINDOW` is a
+fixed material with no tint parameter, and the slider moves the app's layers
+over it rather than changing the material.
+
+Windows keeps control of the details. The material falls back to a solid colour
+when transparency effects are off, when the window is inactive, under Battery
+Saver, and on Windows 10 or a build before 22H2. Nothing here changes the
+Winamp mini player, which draws its own shape.
+
 On `main`, after 0.7.1, the top bar reserves room for the device badge beside
 Search. In narrow windows that badge shows only its icon. The bar stays above
 the page. Library, Queue and Lyrics keep their full height. Hover to read the
