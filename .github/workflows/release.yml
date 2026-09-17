@@ -71,7 +71,6 @@ jobs:
           cp "target/${{ matrix.target }}/release/fastpotify.exe" \
              "target/${{ matrix.target }}/release/spotifast.exe" "dist/$name/"
           cp README.md LICENSE "dist/$name/"
-          cp packaging/fastpotify-portable.txt "dist/$name/"
           cd dist
           7z a "$name.zip" "$name"
 
@@ -122,6 +121,5 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
-          # A tag with a suffix (v0.4.0-rc1) is a pre-release: it stays
-          # off "latest", so the app's update check never offers it.
+          # A tag with a suffix (v0.4.0-rc1) is a pre-release.
           prerelease: ${{ contains(github.ref_name, '-') }}

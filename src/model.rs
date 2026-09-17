@@ -984,11 +984,6 @@ pub enum Action {
     ToggleQueuePanel,
     ToggleLyricsPanel,
     ToggleDevicesPopup,
-    /// Ask GitHub for the latest release and report the result to the user.
-    CheckForUpdates,
-    ShowUpdate,
-    DownloadUpdate,
-    InstallUpdate,
     SettingsChanged,
     SetTheme(crate::settings::ThemeChoice),
     OpenThemesFolder,

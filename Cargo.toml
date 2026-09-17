@@ -19,7 +19,7 @@ path = "src/lib.rs"
 name = "spotifast"
 path = "src/spotifast.rs"
 
-# Compatibility command for scripts and the updater in earlier releases.
+# Compatibility command for shortcuts, scripts and packages that invoke it.
 [[bin]]
 name = "fastpotify"
 path = "src/main.rs"

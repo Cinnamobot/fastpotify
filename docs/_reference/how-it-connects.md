@@ -105,30 +105,12 @@ and dragging never write that order back to Spotify.
   Like and Unlike are kept over lagging reads until Spotify confirms them.
 - Spotifast has no telemetry, analytics, or hosted service. When the lyrics
   panel is open and Spotify has no lyrics, it sends the track's artist, title,
-  album, and length to [lrclib.net](https://lrclib.net). It also checks
-  api.github.com once a day for updates. You can turn off automatic checks in
-  Settings, or request one there at any time. On macOS, **Check for Updates**
-  is also in the application menu.
-
-  On Windows, macOS, and Linux, downloading an update fetches release metadata and
-  `checksums.txt` from the project's GitHub release, then the matching binary
-  archive, Windows installer, or universal macOS DMG. Spotifast checks the published SHA-256 digest
-  and the portable executable's reported version before offering a restart.
-  Automatic downloads are optional; installation always waits for your click.
-  Checks and downloads do not open the update popup. The green update pill opens
-  it on request; closing the popup does not cancel a download.
-  No Spotify credential is sent. These are GitHub-hosted checksums, not a
-  separate publisher signature.
-
-  Updates stage their files in a private `.fastpotify-update-*` directory beside
-  the application so replacement stays on the same filesystem. The directory
-  retains the previous executable or Mac app bundle and `result.txt` for recovery and diagnosis.
-  Settings, caches and credential stores are not replaced. Package-manager
-  installs keep their package-manager update path. Mac updates verify the bundle
-  identifier, version and code signature before replacing the whole app bundle.
-  A Developer ID installation also requires the same signing team and a passing
-  macOS security assessment. Apps running from a disk image or an App Translocation
-  directory must be moved to a writable installation directory first.
+  album, and length to [lrclib.net](https://lrclib.net). It makes no other
+  third-party request, and it never contacts its own project's servers.
+- Spotifast carries no in-app updater. It cannot fetch, stage, or replace its
+  own binary, and it never contacts api.github.com: there is no code path that
+  could install a release you did not build. Updating means `git pull` and
+  rebuilding (see [Getting Started](/getting-started/)).
 
 On `main`, after 0.7.1, album and playlist scrollbars can request a distant track
 page through the existing session or Web API read path, without fetching all

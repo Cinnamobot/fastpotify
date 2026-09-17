@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 const COMMANDS: [(&str, &str); 2] = [
@@ -24,7 +24,7 @@ impl Drop for Scratch {
 }
 
 #[test]
-fn both_commands_report_their_name_and_pass_the_update_version_check() {
+fn both_commands_report_their_name() {
     for (name, binary) in COMMANDS {
         let output = Command::new(binary).arg("--version").output().unwrap();
         assert!(output.status.success());
@@ -39,9 +39,6 @@ fn both_commands_report_their_name_and_pass_the_update_version_check() {
                 .unwrap()
                 .contains(&format!("Usage: {name}"))
         );
-        fastpotify::updates::install::verify_version(Path::new(binary), env!("CARGO_PKG_VERSION"))
-            .unwrap();
-        assert!(fastpotify::updates::install::verify_version(Path::new(binary), "0.0.0").is_err());
     }
 }
 

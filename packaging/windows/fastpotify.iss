@@ -7,7 +7,7 @@
 ; Arch is x86_64 or aarch64, as in the Rust target triple, so the installer
 ; is named like the zip next to it. It needs no administrator rights: the
 ; program goes to the user's own Programs folder with a Start menu entry,
-; and a running copy is closed before an update replaces it.
+; and a running copy is closed before installing over it.
 
 #ifndef Version
   #error Version must be defined on the ISCC command line
@@ -34,7 +34,7 @@
 #define SpotifastBinary ExtractFileDir(Binary) + "\spotifast.exe"
 
 [Setup]
-; Never change: this is how Windows tells an update from a new program.
+; Never change: this is how Windows tells an upgrade from a new program.
 AppId={{FCED1EA0-EBF5-4C32-BA3B-A3AD724BACC3}
 AppName={#AppName}
 AppVersion={#Version}
@@ -77,7 +77,6 @@ Source: "{#Binary}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SpotifastBinary}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
-Source: "fastpotify-installer.txt"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"

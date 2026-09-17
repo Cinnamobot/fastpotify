@@ -21,21 +21,18 @@ const SPINNER_SIZE: f32 = 15.0;
 /// the padding its own label needs.
 const BADGE_PADDING_Y: f32 = 12.0;
 const DEVICE_BADGE_PADDING: f32 = 28.0;
-/// The text starts 24 px in; leave 8 px after it to match the space before
-/// the icon.
-const UPDATE_BADGE_PADDING: f32 = 32.0;
 /// The width the search field aims for, the most it ever takes, and the
-/// least it shrinks to before the badges give up their labels instead.
+/// least it shrinks to before the badge gives up its label instead.
 const SEARCH_IDEAL: f32 = 200.0;
 const SEARCH_MAX: f32 = 440.0;
 const SEARCH_FLOOR: f32 = 130.0;
-// After the badges collapse, a right panel can leave less than 130 points.
+// After the badge collapses, a right panel can leave less than 130 points.
 // Keep the original 80-point minimum inside the page's own toolbar.
 const SEARCH_MIN: f32 = 80.0;
 /// Everything at the right end whose width never changes: the page padding,
 /// the avatar, the gap the account menu leaves, the three icon buttons, and
 /// the spacing between them. The cursor stops at the left edge of the last
-/// button, so this counts three gaps, not four. The spinner and the badges
+/// button, so this counts three gaps, not four. The spinner and the badge
 /// are measured on top of it because they come and go.
 const RIGHT_CONTROLS_WIDTH: f32 =
     super::widgets::PAGE_PADDING + AVATAR_SIZE + 4.0 + 3.0 * ICON_BUTTON_SIZE + 3.0 * ITEM_SPACING;
@@ -45,15 +42,15 @@ const RIGHT_CONTROLS_WIDTH: f32 =
 struct TopbarFit {
     /// How wide the search field may be.
     search: f32,
-    /// Whether the badges have the room to spell themselves out.
+    /// Whether the badge has the room to spell itself out.
     labels: bool,
 }
 
 /// Divide the bar. The search field keeps the half it has always had, but
-/// never so much that the right end has to reach over it, and the badges
-/// fall back to their icons before the field shrinks past reading size.
+/// never so much that the right end has to reach over it, and the badge
+/// falls back to its icon before the field shrinks past reading size.
 ///
-/// `labelled` and `icons` are what the badges ask for with and without their
+/// `labelled` and `icons` are what the badge asks for with and without its
 /// text, each already including the spacing that precedes it.
 fn topbar_fit(room: f32, controls: f32, labelled: f32, icons: f32) -> TopbarFit {
     // SEARCH_IDEAL is above SEARCH_FLOOR, so the clamp below is well ordered.
@@ -224,25 +221,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             ui.add_space(8.0);
 
-            // The badges sit at the right end but grow with their text, so
-            // measure them here, before the search field takes its share.
+            // The badge sits at the right end but grows with its text, so
+            // measure it here, before the search field takes its share.
             let device_galley = app.now_playing().filter(|now| !now.local).map(|now| {
                 let label = format!(
                     "Playing on {}",
                     now.device_name.unwrap_or_else(|| "another device".into())
                 );
-                ui.painter()
-                    .layout_no_wrap(label, theme::medium(12.5), palette.accent)
-            });
-            let update = app.update.clone();
-            let update_galley = update.as_ref().map(|update| {
-                let label = match &app.update_download {
-                    crate::updates::DownloadState::Ready(_) => "Update ready".into(),
-                    crate::updates::DownloadState::Downloading { .. } => {
-                        "Downloading update…".into()
-                    }
-                    _ => format!("Update to {}", update.version),
-                };
                 ui.painter()
                     .layout_no_wrap(label, theme::medium(12.5), palette.accent)
             });
@@ -252,10 +237,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .backend
                 .activity()
                 .busy(std::time::Duration::from_millis(1000));
-            let badges = |labels: bool| {
-                badge_width(device_galley.as_ref(), DEVICE_BADGE_PADDING, labels)
-                    + badge_width(update_galley.as_ref(), UPDATE_BADGE_PADDING, labels)
-            };
+            let badges =
+                |labels: bool| badge_width(device_galley.as_ref(), DEVICE_BADGE_PADDING, labels);
             let controls = RIGHT_CONTROLS_WIDTH
                 + if busy {
                     SPINNER_SIZE + ITEM_SPACING
@@ -470,22 +453,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         app.actions.push(Action::ToggleDevicesPopup);
                     }
                 }
-                // A newer release. Most people never visit a releases page,
-                // so the app says so, quietly, until they do.
-                if let (Some(galley), Some(update)) = (update_galley, update)
-                    && badge(
-                        ui,
-                        &palette,
-                        Icon::Info,
-                        galley,
-                        UPDATE_BADGE_PADDING,
-                        fit.labels,
-                    )
-                    .on_hover_text(format!("Version {} is available.", update.version))
-                    .clicked()
-                {
-                    app.actions.push(Action::ShowUpdate);
-                }
             });
         },
     );
@@ -503,11 +470,10 @@ fn capitalize(text: &str) -> String {
 mod topbar_fit_tests {
     use super::*;
 
-    // What the badges measure on a bar showing "Playing on MacBook de Luis"
-    // and "Update to 0.7.1", each including the spacing before it.
+    // What the device badge measures on a bar showing
+    // "Playing on MacBook de Luis", including the spacing before it.
     const DEVICE: f32 = ITEM_SPACING + 176.0;
-    const UPDATE: f32 = ITEM_SPACING + 152.0;
-    // Collapsed, a badge is a square chip as tall as its text.
+    // Collapsed, the badge is a square chip as tall as its text.
     const CHIP: f32 = ITEM_SPACING + 15.0 + BADGE_PADDING_Y;
 
     /// The narrowest bar the app can produce: a 760 px window, its sidebar,
@@ -522,7 +488,7 @@ mod topbar_fit_tests {
 
     #[test]
     fn a_wide_bar_keeps_the_field_it_always_had() {
-        let fit = topbar_fit(2000.0, RIGHT_CONTROLS_WIDTH, DEVICE + UPDATE, CHIP * 2.0);
+        let fit = topbar_fit(2000.0, RIGHT_CONTROLS_WIDTH, DEVICE, CHIP);
         assert_eq!(fit.search, SEARCH_MAX);
         assert!(fit.labels);
         // Half the room, as before, while half still fits.
@@ -534,16 +500,11 @@ mod topbar_fit_tests {
     fn the_right_end_never_reaches_over_the_search_field() {
         let mut room = NARROWEST_BAR;
         while room <= 2400.0 {
-            for (labelled, icons) in [
-                (0.0, 0.0),
-                (DEVICE, CHIP),
-                (UPDATE, CHIP),
-                (DEVICE + UPDATE, CHIP * 2.0),
-            ] {
+            for (labelled, icons) in [(0.0, 0.0), (DEVICE, CHIP)] {
                 let over = right_end(room, labelled, icons);
                 assert!(
                     over <= 0.0,
-                    "badges overlap the field by {over} px on a {room} px bar"
+                    "the badge overlaps the field by {over} px on a {room} px bar"
                 );
             }
             room += 1.0;
@@ -552,18 +513,18 @@ mod topbar_fit_tests {
 
     #[test]
     fn a_right_panel_can_narrow_search_after_the_badges_collapse() {
-        let room = RIGHT_CONTROLS_WIDTH + CHIP * 2.0 + 100.0;
-        let fit = topbar_fit(room, RIGHT_CONTROLS_WIDTH, DEVICE + UPDATE, CHIP * 2.0);
+        let room = RIGHT_CONTROLS_WIDTH + CHIP + 100.0;
+        let fit = topbar_fit(room, RIGHT_CONTROLS_WIDTH, DEVICE, CHIP);
         assert!(!fit.labels);
         assert_eq!(fit.search, 100.0);
-        assert_eq!(right_end(room, DEVICE + UPDATE, CHIP * 2.0), 0.0);
+        assert_eq!(right_end(room, DEVICE, CHIP), 0.0);
     }
 
     #[test]
     fn a_narrow_bar_trades_the_badge_labels_for_their_icons() {
         assert!(topbar_fit(1400.0, RIGHT_CONTROLS_WIDTH, DEVICE, CHIP).labels);
         // The 1080 px window of the report that started this.
-        assert!(topbar_fit(952.0, RIGHT_CONTROLS_WIDTH, DEVICE + UPDATE, CHIP * 2.0).labels);
+        assert!(topbar_fit(952.0, RIGHT_CONTROLS_WIDTH, DEVICE, CHIP).labels);
         assert!(!topbar_fit(NARROWEST_BAR, RIGHT_CONTROLS_WIDTH, DEVICE, CHIP).labels);
     }
 
@@ -571,7 +532,7 @@ mod topbar_fit_tests {
     fn the_field_stays_readable_however_tight_the_bar_gets() {
         let mut room = NARROWEST_BAR;
         while room <= 2400.0 {
-            let fit = topbar_fit(room, RIGHT_CONTROLS_WIDTH, DEVICE + UPDATE, CHIP * 2.0);
+            let fit = topbar_fit(room, RIGHT_CONTROLS_WIDTH, DEVICE, CHIP);
             assert!(fit.search >= SEARCH_FLOOR, "field is {} px", fit.search);
             assert!(fit.search <= SEARCH_MAX);
             room += 1.0;

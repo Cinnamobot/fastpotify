@@ -316,13 +316,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     "Spotifast hides to the system tray. Quit from the tray menu or with Ctrl+Q.",
                     "Spotifast hides to the system tray. Quit from the tray menu or with Cmd+Q.",
                 )),
-        RowText::new("Automatic update checks", "Checks GitHub once a day. No personal data is sent."),
         RowText::new("Audio output", "PulseAudio also covers PipeWire. Rodio talks to ALSA directly.").when(cfg!(target_os = "linux")),
         RowText::new("Output buffer", "More buffering can prevent clicks on busy computers. Less buffering makes controls respond sooner.").when(cfg!(windows)),
         RowText::new("Audio cache", "Save downloaded audio for later playback."),
         RowText::new("Apply and restart playback", "Restart local playback to apply these settings.").when(playback_dirty),
         RowText::new("Playback settings applied", "").when(!playback_dirty),
-        RowText::new("Download updates automatically", "Downloads in the background. You choose when to restart.")
     ];
     if section_matches(&needle, "Playback on this computer", &playback_rows) {
         any_visible = true;
@@ -492,51 +490,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     }
                 },
             );
-            filtered_row(
-                ui,
-                &palette,
-                &needle,
-                "Playback on this computer",
-                &playback_rows[8],
-                |ui| {
-                    if widgets::switch(
-                        ui,
-                        &palette,
-                        "Automatic update checks",
-                        &mut app.settings.check_for_updates,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                },
-            );
-            filtered_row(
-                ui,
-                &palette,
-                &needle,
-                "Playback on this computer",
-                &playback_rows[14],
-                |ui| {
-                    if widgets::switch(
-                        ui,
-                        &palette,
-                        "Download updates automatically",
-                        &mut app.settings.download_updates_automatically,
-                    )
-                    .changed()
-                    {
-                        changed = true;
-                    }
-                },
-            );
             if cfg!(target_os = "linux") {
                 filtered_row(
                     ui,
                     &palette,
                     &needle,
                     "Playback on this computer",
-                    &playback_rows[9],
+                    &playback_rows[8],
                     |ui| {
                         let current = app
                             .settings
@@ -569,7 +529,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 &needle,
                 "Playback on this computer",
-                &playback_rows[10],
+                &playback_rows[9],
                 |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
@@ -593,7 +553,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 &needle,
                 "Playback on this computer",
-                &playback_rows[11],
+                &playback_rows[10],
                 |ui| {
                     // The control area lays out right-to-left: add the rightmost item first.
                     ui.horizontal(|ui| {
@@ -634,8 +594,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             );
             ui.add_space(4.0);
             if playback_dirty
+                || playback_rows[11].matches(&needle, "Playback on this computer")
                 || playback_rows[12].matches(&needle, "Playback on this computer")
-                || playback_rows[13].matches(&needle, "Playback on this computer")
             {
                 ui.horizontal(|ui| {
                     if playback_dirty {
@@ -1321,10 +1281,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             format!("Spotifast {}", env!("CARGO_PKG_VERSION")),
             "Built with Rust, egui, and librespot. Not affiliated with Spotify.",
         ),
-        RowText::new(
-            "Check for updates Checking…",
-            "Keyboard shortcuts Source code",
-        ),
+        RowText::new("Keyboard shortcuts", "Source code"),
     ];
     if section_matches(&needle, "About", &about_rows) {
         any_visible = true;
@@ -1350,17 +1307,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
-                let check_label = if app.update_checking {
-                    "Checking…"
-                } else {
-                    "Check for updates"
-                };
-                if theme::soft_button(ui, &palette, Some(Icon::Refresh), check_label, false)
-                    .clicked()
-                    && !app.update_checking
-                {
-                    app.actions.push(Action::CheckForUpdates);
-                }
                 if theme::soft_button(ui, &palette, Some(Icon::Info), "Keyboard shortcuts", false)
                     .clicked()
                 {

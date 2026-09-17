@@ -22,19 +22,17 @@ Flatpak ID and Cargo package name. Their display name changes to Spotifast;
 their upgrade identity stays the same. Nix also exposes `spotifast` and, on
 macOS, `spotifast-app`, alongside the old attribute names.
 
-## Updates and packaging
+## Packaging
 
-Release asset names retain the `fastpotify-` prefix so older update clients
-can find them. The compatibility command keeps its `fastpotify VERSION`
-response. The Spotifast command reports `spotifast VERSION`; new update clients
-accept either name and still require the exact expected version and checksum.
+Release asset names retain the `fastpotify-` prefix, and the compatibility
+command keeps its `fastpotify VERSION` response. The Spotifast command reports
+`spotifast VERSION`.
 
 New macOS installations use `Spotifast.app`. The bundle ID remains
 `me.paolino.fastpotify`, and its internal executable remains `fastpotify`.
-The disk image also includes a hidden, signed copy named `Fastpotify.app` for
-older updaters that require that path. Updating an existing installation
-preserves its current bundle location. Homebrew updates remain owned by
-Homebrew, whichever bundle name is installed.
+Replacing an existing installation preserves its current bundle location.
+Homebrew upgrades remain owned by Homebrew, whichever bundle name is
+installed.
 
 Windows keeps its original installer ID, registry identities and installation
 directory. Its app name and new shortcuts say Spotifast. The previous command

@@ -27,9 +27,7 @@ them. Choose x86_64 for most PCs or aarch64 for Windows on ARM:
 - [fastpotify-v{{ v }}-x86_64-pc-windows-msvc-setup.exe]({{ base }}/fastpotify-v{{ v }}-x86_64-pc-windows-msvc-setup.exe)
 - [fastpotify-v{{ v }}-aarch64-pc-windows-msvc-setup.exe]({{ base }}/fastpotify-v{{ v }}-aarch64-pc-windows-msvc-setup.exe)
 
-For a portable copy, download a zip, unpack it, and run `fastpotify.exe`. The
-zip identifies itself as a portable download, which is what lets the app
-update itself in place:
+For a portable copy, download a zip, unpack it, and run `fastpotify.exe`:
 
 - [fastpotify-v{{ v }}-x86_64-pc-windows-msvc.zip]({{ base }}/fastpotify-v{{ v }}-x86_64-pc-windows-msvc.zip)
 - [fastpotify-v{{ v }}-aarch64-pc-windows-msvc.zip]({{ base }}/fastpotify-v{{ v }}-aarch64-pc-windows-msvc.zip)
